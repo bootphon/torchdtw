@@ -56,14 +56,14 @@ cdef CTYPE_t c_dtw(const CTYPE_t* distances, int N, int M, int stride) nogil:
     return final_cost / path_len
 
 
-cpdef dtw_cython(CTYPE_t[:,:] distances):
+cpdef _dtw_cython(CTYPE_t[:,:] distances):
     cdef int N = distances.shape[0]
     cdef int M = distances.shape[1]
     cdef int stride = distances.strides[0] // sizeof(CTYPE_t)
     return c_dtw(&distances[0, 0], N, M, stride)
 
 
-def dtw_cython_batch(CTYPE_t[:, :, :, :] distances, IND_t[:] sx, IND_t[:] sy, bint symmetric):
+def _dtw_cython_batch(CTYPE_t[:, :, :, :] distances, IND_t[:] sx, IND_t[:] sy, bint symmetric):
     cdef int i, j, k, num_tasks
     cdef int nx = distances.shape[0]
     cdef int ny = distances.shape[1]

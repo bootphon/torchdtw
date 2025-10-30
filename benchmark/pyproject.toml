@@ -1,7 +1,11 @@
+[build-system]
+requires = ["setuptools>=80.9.0", "numpy>=2.3", "cython>=3.1.6"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "dtw-benchmark"
 version = "0.1.0"
-description = "Add your description here"
+description = "Benchmark DTW implementations"
 readme = "README.md"
 authors = [
     { name = "Maxime Poli" },
@@ -17,9 +21,16 @@ dependencies = [
     "triton>=3.5.0",
 ]
 
-[build-system]
-requires = ["flit_core>=3.2,<4"]
-build-backend = "flit_core.buildapi"
+[tool.distutils.bdist_wheel]
+py_limited_api = "cp312"
 
 [tool.uv.sources]
 torchdtw = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.1.0",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
