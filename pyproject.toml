@@ -1,0 +1,56 @@
+[build-system]
+requires = [
+    "setuptools>=80.9.0",
+    "setuptools-scm>=9.2.0",
+    "torch>=2.9.0",
+    "numpy>=1.26.4",
+    "ninja>=1.11",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torchdtw"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    { name = "Maxime Poli" },
+    { name = "CoML", email = "dev@cognitive-ml.fr" },
+]
+keywords = ["machine learning"]
+license = "MIT"
+dependencies = [
+    "numpy>=1.26.4",
+    "torch>=2.9.0",
+]
+dynamic = ["version"]
+
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
+
+[tool.ruff]
+line-length = 119
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",  # missing-trailing-comma
+    "D105",    # undocumented-magic-method
+    "D107",    # undocumented-public-init
+    "D203",    # incorrect-blank-line-before-class
+    "D213",    # multi-line-summary-second-line
+    "PLR0913", # too-many-arguments
+]
+
+[tool.uv.workspace]
+members = [
+    "benchmark",
+    "torchdtw",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.1.0",
+    "ruff>=0.14.2",
+]
+

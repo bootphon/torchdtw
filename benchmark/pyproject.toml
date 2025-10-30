@@ -1,0 +1,25 @@
+[project]
+name = "dtw-benchmark"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Maxime Poli" },
+    { name = "CoML", email = "dev@cognitive-ml.fr" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "torchdtw",
+    "cython>=3.1.6",
+    "numba>=0.62.1",
+    "numpy>=2.3.4",
+    "torch>=2.9.0",
+    "triton>=3.5.0",
+]
+
+[build-system]
+requires = ["flit_core>=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.uv.sources]
+torchdtw = { workspace = true }
