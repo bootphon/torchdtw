@@ -1,5 +1,7 @@
 import torch
-from torch.utils.benchmark import Compare, Timer, Measurement
+from torch.utils.benchmark import Compare, Measurement, Timer
+
+from dtw_benchmark import dtw, dtw_cython, dtw_numba, dtw_torch, dtw_triton
 
 
 def get_measurements(
@@ -9,6 +11,10 @@ def get_measurements(
 ) -> list[Measurement]:
     num_threads = torch.get_num_threads()
     x = torch.testing.make_tensor((n, n), dtype=torch.float32, device=device)
+
+    outputs = [d(x) for d in [dtw, dtw_cython, dtw_numba, dtw_torch] + ([dtw_triton] if x.is_cuda else [])]
+    for out in outputs[1:]:
+        torch.testing.assert_close(out, outputs[0])
 
     def measure(function: str, sub_label: str) -> Measurement:
         return Timer(
@@ -21,19 +27,15 @@ def get_measurements(
             description=str(n),
         ).blocked_autorange(min_run_time=min_run_time)
 
-    return (
-        [
-            measure("dtw_torch", "PyTorch naive"),
-            measure("dtw_cython", "Cython"),
-            measure("dtw_numba", "Numba"),
-        ]
+    return ([measure("dtw_torch", "PyTorch naive")] if n < 20 else []) + (
+        [measure("dtw_cython", "Cython"), measure("dtw_numba", "Numba")]
         + ([measure("dtw_triton", "Triton")] if x.is_cuda else [])
         + [measure("dtw", "PyTorch C++ extension")]
     )
 
 
 def benchmark(min_run_time: float = 0.2) -> None:
-    dims, device_types = [16, 32, 64, 128, 256, 512], ["cpu", "cuda"]
+    dims, device_types = [16, 32, 64, 128, 256, 512, 1023], ["cpu", "cuda"]
     results = []
     for device_type in device_types:
         for n in dims:

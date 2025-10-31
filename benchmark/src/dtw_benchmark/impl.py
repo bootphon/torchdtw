@@ -16,9 +16,7 @@ def dtw_torch(distances: torch.Tensor) -> torch.Tensor:
     cost[0, :] = torch.cumsum(distances[0, :], 0)
     for i in range(1, N):
         for j in range(1, M):
-            cost[i, j] = distances[i, j] + min(
-                cost[i - 1, j], cost[i - 1, j - 1], cost[i, j - 1]
-            )
+            cost[i, j] = distances[i, j] + min(cost[i - 1, j], cost[i - 1, j - 1], cost[i, j - 1])
     path_len, i, j = 1, N - 1, M - 1
     while i > 0 and j > 0:
         c_up, c_left, c_diag = cost[i - 1, j], cost[i, j - 1], cost[i - 1, j - 1]
@@ -151,9 +149,7 @@ def dtw_triton(x: torch.Tensor) -> torch.Tensor:
     BLOCK_SIZE = 1024
     M, N = x.shape
     assert M < BLOCK_SIZE, f"M should be smaller than {BLOCK_SIZE=}"
-    x_skew = (
-        F.pad(x, (0, M + 1), value=torch.inf).flatten()[: M * (N + M)].reshape(M, N + M)
-    )
+    x_skew = F.pad(x, (0, M + 1), value=torch.inf).flatten()[: M * (N + M)].reshape(M, N + M)
     x_skew = x_skew.T.contiguous()
     cost = torch.ones(N + M + 2, M + 2) * torch.inf
     cost[0, 0] = 0
@@ -170,10 +166,8 @@ def dtw_triton(x: torch.Tensor) -> torch.Tensor:
         M,
         BLOCK_SIZE=BLOCK_SIZE,
     )
-    trace = trace.T.flatten()[: (M + 1) * (M + N + 3)].reshape(M + 1, M + N + 3)[
-        :, : N + 1
-    ]
-    cost = cost.T.flatten()[: (M + 1) * (M + N + 3)].reshape(M + 1, M + N + 3)[
-        :, : N + 1
-    ]
-    return cost[-1, -1] / _backtrace(trace.cpu().numpy())
+    trace = trace.T.flatten()[: (M + 1) * (M + N + 3)].reshape(M + 1, M + N + 3)[:, : N + 1]
+    flat_index = M * (M + N + 3) + N
+    row = flat_index % (N + M + 2)
+    col = flat_index // (N + M + 2)
+    return cost[row, col] / _backtrace(trace.cpu().numpy())
