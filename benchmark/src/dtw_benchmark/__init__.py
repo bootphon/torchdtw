@@ -2,7 +2,7 @@
 
 from torchdtw import dtw, dtw_batch
 
-from .impl import dtw_cython, dtw_cython_batch, dtw_numba, dtw_torch, dtw_triton
+from .implementations import dtw_cython, dtw_cython_batch, dtw_numba, dtw_torch, dtw_triton
 
 __all__ = [
     "dtw",
