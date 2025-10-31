@@ -1,3 +1,5 @@
+"""Additionnal implementations of DTW."""
+
 import numba
 import numpy as np
 import numpy.typing as npt
@@ -10,6 +12,7 @@ from .dtw_cython import _dtw_cython, _dtw_cython_batch
 
 
 def dtw_torch(distances: torch.Tensor) -> torch.Tensor:
+    """Naive DTW implementation."""
     N, M = distances.shape
     cost = torch.zeros_like(distances)
     cost[:, 0] = torch.cumsum(distances[:, 0], 0)
@@ -36,6 +39,7 @@ def dtw_torch(distances: torch.Tensor) -> torch.Tensor:
 
 
 def dtw_cython(distances: torch.Tensor) -> torch.Tensor:
+    """Cython DTW."""
     return torch.tensor(_dtw_cython(distances.cpu().numpy()), device=distances.device)
 
 
@@ -46,6 +50,7 @@ def dtw_cython_batch(
     *,
     symmetric: bool,
 ) -> torch.Tensor:
+    """Batched Cython DTW."""
     return torch.from_numpy(
         _dtw_cython_batch(
             distances.cpu().numpy(),
@@ -72,7 +77,7 @@ def _backtrace(trace: npt.NDArray) -> float:
         elif trace[i, j] == 2:
             j -= 1
         else:
-            raise ValueError("Unexpected trace[i, j]")
+            raise ValueError(trace[i, j])
         path_len += 1
     if i == 0:
         path_len += j
@@ -104,6 +109,7 @@ def _dtw_numba(x: npt.NDArray) -> float:
 
 
 def dtw_numba(distances: torch.Tensor) -> torch.Tensor:
+    """Numba implementation from Whisper: https://github.com/openai/whisper/blob/main/whisper/timing.py."""
     return torch.tensor(_dtw_numba(distances.cpu().numpy()), device=distances.device)
 
 
@@ -146,9 +152,10 @@ def _dtw_triton_kernel(
 
 
 def dtw_triton(x: torch.Tensor) -> torch.Tensor:
+    """Triton implementation from Whisper: https://github.com/openai/whisper/blob/main/whisper/triton_ops.py."""
     BLOCK_SIZE = 1024
     M, N = x.shape
-    assert M < BLOCK_SIZE, f"M should be smaller than {BLOCK_SIZE=}"
+    assert M < BLOCK_SIZE, f"M should be smaller than {BLOCK_SIZE=}"  # noqa: S101
     x_skew = F.pad(x, (0, M + 1), value=torch.inf).flatten()[: M * (N + M)].reshape(M, N + M)
     x_skew = x_skew.T.contiguous()
     cost = torch.ones(N + M + 2, M + 2) * torch.inf

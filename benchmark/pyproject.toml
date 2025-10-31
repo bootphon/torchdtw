@@ -26,14 +26,3 @@ py_limited_api = "cp312"
 
 [tool.uv.sources]
 torchdtw = { workspace = true }
-
-[dependency-groups]
-dev = [
-    "ipykernel>=7.1.0",
-]
-
-[tool.ruff]
-line-length = 119
-
-[tool.ruff.lint]
-select = ["E", "F", "W"]

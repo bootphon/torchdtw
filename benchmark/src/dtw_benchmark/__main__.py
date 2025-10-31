@@ -1,17 +1,17 @@
+"""Run the benchmark."""
+
 import torch
 from torch.utils.benchmark import Compare, Measurement, Timer
 
 from dtw_benchmark import dtw, dtw_cython, dtw_numba, dtw_torch, dtw_triton
 
+DIMENSIONS = [16, 32, 64, 128, 256, 512]
 
-def get_measurements(
-    n: int,
-    device: torch.device,
-    min_run_time: float = 0.2,
-) -> list[Measurement]:
+
+def get_measurements(dim: int, device: torch.device, min_run_time: float = 0.2) -> list[Measurement]:
+    """Measure DTW execution time."""
     num_threads = torch.get_num_threads()
-    x = torch.testing.make_tensor((n, n), dtype=torch.float32, device=device)
-
+    x = torch.testing.make_tensor((dim, dim), dtype=torch.float32, device=device)
     outputs = [d(x) for d in [dtw, dtw_cython, dtw_numba, dtw_torch] + ([dtw_triton] if x.is_cuda else [])]
     for out in outputs[1:]:
         torch.testing.assert_close(out, outputs[0])
@@ -24,10 +24,10 @@ def get_measurements(
             num_threads=num_threads,
             label=device.type,
             sub_label=sub_label,
-            description=str(n),
+            description=str(dim),
         ).blocked_autorange(min_run_time=min_run_time)
 
-    return ([measure("dtw_torch", "PyTorch naive")] if n < 20 else []) + (
+    return ([measure("dtw_torch", "PyTorch naive")] if dim == DIMENSIONS[0] else []) + (
         [measure("dtw_cython", "Cython"), measure("dtw_numba", "Numba")]
         + ([measure("dtw_triton", "Triton")] if x.is_cuda else [])
         + [measure("dtw", "PyTorch C++ extension")]
@@ -35,11 +35,11 @@ def get_measurements(
 
 
 def benchmark(min_run_time: float = 0.2) -> None:
-    dims, device_types = [16, 32, 64, 128, 256, 512, 1023], ["cpu", "cuda"]
+    """Benchmark DTW."""
     results = []
-    for device_type in device_types:
-        for n in dims:
-            results.extend(get_measurements(n, torch.device(device_type), min_run_time))
+    for device_type in ["cpu", "cuda"]:
+        for dim in DIMENSIONS:
+            results.extend(get_measurements(dim, torch.device(device_type), min_run_time))
     compare = Compare(results)
     compare.colorize()
     compare.print()

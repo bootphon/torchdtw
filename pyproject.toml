@@ -1,7 +1,6 @@
 [build-system]
 requires = [
     "setuptools>=80.9.0",
-    "setuptools-scm>=9.2.0",
     "torch>=2.9.0",
     "numpy>=1.26.4",
     "ninja>=1.11",
@@ -10,6 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchdtw"
+version = "1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,10 +23,13 @@ dependencies = [
     "numpy>=1.26.4",
     "torch>=2.9.0",
 ]
-dynamic = ["version"]
 
-[tool.setuptools_scm]
-version_scheme = "no-guess-dev"
+[dependency-groups]
+dev = [
+    "ipykernel>=7.1.0",
+    "ruff>=0.14.2",
+    "typos>=1.36.2",
+]
 
 [tool.ruff]
 line-length = 119
@@ -39,18 +42,21 @@ ignore = [
     "D107",    # undocumented-public-init
     "D203",    # incorrect-blank-line-before-class
     "D213",    # multi-line-summary-second-line
+    "N803",
+    "N806",
+    "N812",
     "PLR0913", # too-many-arguments
 ]
+
+[tool.ruff.lint.pylint]
+allow-magic-value-types = ["int"]
+
+[tool.ruff.lint.flake8-self]
+ignore-names = ["_check"]
 
 [tool.uv.workspace]
 members = [
     "benchmark",
     "torchdtw",
-]
-
-[dependency-groups]
-dev = [
-    "ipykernel>=7.1.0",
-    "ruff>=0.14.2",
 ]
 
