@@ -125,9 +125,8 @@ jobs:
       - name: Build wheel
         shell: bash
         run: |
-          uv venv -p 3.12
-          uv pip install setuptools numpy ninja
-          uv pip install torch --index-url https://download.pytorch.org/whl/${{ matrix.torch-backend }}
+          uv venv
+          uv pip install setuptools numpy ninja torch --torch-backend ${{ matrix.torch-backend }}
           uv build --wheel --package torchdtw --no-build-isolation
 
       - name: Relabel the Linux wheel
