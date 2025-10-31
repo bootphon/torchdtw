@@ -14,11 +14,9 @@ jobs:
         include:
           - { os: "macos-14",  torch-backend: "cpu" }
           - { os: "ubuntu-22.04", torch-backend: "cpu" }
-          - { os: "ubuntu-22.04", torch-backend: "cu126" }
           - { os: "ubuntu-22.04", torch-backend: "cu128" }
           - { os: "ubuntu-22.04", torch-backend: "cu130" }
           - { os: "windows-latest", torch-backend: "cpu" }
-          - { os: "windows-latest", torch-backend: "cu126" }
           - { os: "windows-latest", torch-backend: "cu128" }
           - { os: "windows-latest", torch-backend: "cu130" }
     env:
