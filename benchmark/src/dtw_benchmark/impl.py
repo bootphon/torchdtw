@@ -159,7 +159,7 @@ def dtw_triton(x: torch.Tensor) -> torch.Tensor:
     cost[0, 0] = 0
     cost = cost.to(x.device)
     trace = torch.zeros_like(cost, dtype=torch.int32)
-    dtw_kernel[(1,)](
+    _dtw_triton_kernel[(1,)](
         cost,
         trace,
         x_skew,
@@ -173,4 +173,7 @@ def dtw_triton(x: torch.Tensor) -> torch.Tensor:
     trace = trace.T.flatten()[: (M + 1) * (M + N + 3)].reshape(M + 1, M + N + 3)[
         :, : N + 1
     ]
-    return backtrace(trace.cpu().numpy())
+    cost = cost.T.flatten()[: (M + 1) * (M + N + 3)].reshape(M + 1, M + N + 3)[
+        :, : N + 1
+    ]
+    return cost[-1, -1] / _backtrace(trace.cpu().numpy())

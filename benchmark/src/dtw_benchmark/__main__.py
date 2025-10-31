@@ -21,12 +21,15 @@ def get_measurements(
             description=str(n),
         ).blocked_autorange(min_run_time=min_run_time)
 
-    return [
-        measure("dtw_torch", "PyTorch naive"),
-        measure("dtw_cython", "Cython"),
-        measure("dtw_numba", "Numba"),
-        measure("dtw", "PyTorch C++ extension"),
-    ]
+    return (
+        [
+            measure("dtw_torch", "PyTorch naive"),
+            measure("dtw_cython", "Cython"),
+            measure("dtw_numba", "Numba"),
+        ]
+        + ([measure("dtw_triton", "Triton")] if x.is_cuda else [])
+        + [measure("dtw", "PyTorch C++ extension")]
+    )
 
 
 def benchmark(min_run_time: float = 0.2) -> None:
