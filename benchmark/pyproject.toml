@@ -20,8 +20,5 @@ dependencies = [
     "triton>=3.5.0",
 ]
 
-[tool.distutils.bdist_wheel]
-py_limited_api = "cp312"
-
 [tool.uv.sources]
 torchdtw = { workspace = true }
