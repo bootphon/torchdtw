@@ -1,59 +1,49 @@
 import torch
-from torch.utils.benchmark import Compare, Timer
+from torch.utils.benchmark import Compare, Timer, Measurement
 
 
-def get_timers(n: int, label: str = "CPU"):
-    x = torch.randn((n, n))
-    t_torch = Timer(
-        stmt="dtw_torch(x)",
-        setup="from dtw_benchmark.impl import dtw_torch",
-        globals={"x": x},
-        num_threads=num_threads,
-        label=label,
-        sub_label="PyTorch naive",
-        description=str(n),
-    )
-    t_cython = Timer(
-        stmt="dtw_cython(x)",
-        setup="from dtw_benchmark.impl import dtw_cython",
-        globals={"x": x},
-        num_threads=num_threads,
-        label="CPU",
-        sub_label="Cython",
-        description=str(n),
-    )
-    t_numba = Timer(
-        stmt="dtw_numba(x)",
-        setup="from dtw_benchmark.impl import dtw_numba",
-        globals={"x": x},
-        num_threads=num_threads,
-        label=label,
-        sub_label="Numba",
-        description=str(n),
-    )
-    t_torchdtw = Timer(
-        stmt="dtw(x)",
-        setup="from torchdtw import dtw",
-        globals={"x": x},
-        num_threads=num_threads,
-        label=label,
-        sub_label="PyTorch C++ extension",
-        description=str(n),
-    )
+def get_measurements(
+    n: int,
+    device: torch.device,
+    min_run_time: float = 0.2,
+) -> list[Measurement]:
+    num_threads = torch.get_num_threads()
+    x = torch.testing.make_tensor((n, n), dtype=torch.float32, device=device)
+
+    def measure(function: str, sub_label: str) -> Measurement:
+        return Timer(
+            stmt=f"{function}(x)",
+            setup=f"from dtw_benchmark import {function}",
+            globals={"x": x},
+            num_threads=num_threads,
+            label=device.type,
+            sub_label=sub_label,
+            description=str(n),
+        ).blocked_autorange(min_run_time=min_run_time)
+
     return [
-        t_torch.blocked_autorange(min_run_time=min_run_time),
-        t_cython.blocked_autorange(min_run_time=min_run_time),
-        t_numba.blocked_autorange(min_run_time=min_run_time),
-        t_torchdtw.blocked_autorange(min_run_time=min_run_time),
+        measure("dtw_torch", "PyTorch naive"),
+        measure("dtw_cython", "Cython"),
+        measure("dtw_numba", "Numba"),
+        measure("dtw", "PyTorch C++ extension"),
     ]
 
 
-if __name__ == "__main__":
-    num_threads = torch.get_num_threads()
-    min_run_time = 0.2
+def benchmark(min_run_time: float = 0.2) -> None:
+    dims, device_types = [16, 32, 64, 128, 256, 512], ["cpu", "cuda"]
     results = []
-    for n in [16, 32, 64, 128, 256, 512]:
-        results.extend(get_timers(n))
+    for device_type in device_types:
+        for n in dims:
+            results.extend(get_measurements(n, torch.device(device_type), min_run_time))
     compare = Compare(results)
     compare.colorize()
     compare.print()
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--min-run-time", type=float, default=0.2)
+    args = parser.parse_args()
+    benchmark(args.min_run_time)
