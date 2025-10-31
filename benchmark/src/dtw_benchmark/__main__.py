@@ -3,12 +3,12 @@
 import torch
 from torch.utils.benchmark import Compare, Measurement, Timer
 
-from dtw_benchmark import dtw, dtw_cython, dtw_numba, dtw_torch, dtw_triton
+from . import dtw, dtw_cython, dtw_numba, dtw_torch, dtw_triton
 
 DIMENSIONS = [16, 32, 64, 128, 256, 512]
 
 
-def get_measurements(dim: int, device: torch.device, min_run_time: float = 0.2) -> list[Measurement]:
+def measurements(dim: int, device: torch.device, min_run_time: float = 0.2) -> list[Measurement]:
     """Measure DTW execution time."""
     num_threads = torch.get_num_threads()
     x = torch.testing.make_tensor((dim, dim), dtype=torch.float32, device=device)
@@ -37,9 +37,9 @@ def get_measurements(dim: int, device: torch.device, min_run_time: float = 0.2) 
 def benchmark(min_run_time: float = 0.2) -> None:
     """Benchmark DTW."""
     results = []
-    for device_type in ["cpu", "cuda"]:
+    for device_type in ["cpu"] + (["cuda"] if torch.cuda.is_available() else []):
         for dim in DIMENSIONS:
-            results.extend(get_measurements(dim, torch.device(device_type), min_run_time))
+            results.extend(measurements(dim, torch.device(device_type), min_run_time))
     compare = Compare(results)
     compare.colorize()
     compare.print()
