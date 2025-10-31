@@ -138,7 +138,7 @@ jobs:
       - name: Copy the wheel with torch version and backend
         shell: bash
         run: |
-          wheel=$(ls ./dist/fastabx-*.whl)
+          wheel=$(ls ./dist/torchdtw-*.whl)
           if [ "$IS_DEFAULT" = true ]; then
             cp "$wheel" "${wheel/-cp/+${{ matrix.torch-backend }}-cp}"
           else
