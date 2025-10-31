@@ -9,7 +9,6 @@ from torch.nn import functional as F
 from .dtw_cython import _dtw_cython, _dtw_cython_batch
 
 
-@torch.compile(dynamic=True, fullgraph=True)
 def dtw_torch(distances: torch.Tensor) -> torch.Tensor:
     N, M = distances.shape
     cost = torch.zeros_like(distances)
@@ -39,7 +38,7 @@ def dtw_torch(distances: torch.Tensor) -> torch.Tensor:
 
 
 def dtw_cython(distances: torch.Tensor) -> torch.Tensor:
-    return torch.tensor(_dtw_cython(distances.numpy()))
+    return torch.tensor(_dtw_cython(distances.cpu().numpy()), device=distances.device)
 
 
 def dtw_cython_batch(
@@ -51,16 +50,16 @@ def dtw_cython_batch(
 ) -> torch.Tensor:
     return torch.from_numpy(
         _dtw_cython_batch(
-            distances.numpy(),
-            sx.numpy(),
-            sy.numpy(),
+            distances.cpu().numpy(),
+            sx.cpu().numpy(),
+            sy.cpu().numpy(),
             symmetric,
-        )
-    )
+        ),
+    ).to(distances.device)
 
 
 @numba.jit(nopython=True)
-def _backtrace(trace: npt.NDArray[tuple[int, int], np.int32]) -> float:
+def _backtrace(trace: npt.NDArray) -> float:
     i = trace.shape[0] - 1
     j = trace.shape[1] - 1
     path_len = 0
@@ -85,7 +84,7 @@ def _backtrace(trace: npt.NDArray[tuple[int, int], np.int32]) -> float:
 
 
 @numba.jit(nopython=True, parallel=True)
-def _dtw_numba(x: npt.NDArray[tuple[int, int], np.float32]) -> float:
+def _dtw_numba(x: npt.NDArray) -> float:
     N, M = x.shape
     cost = np.ones((N + 1, M + 1), dtype=np.float32) * np.inf
     trace = -np.ones((N + 1, M + 1), dtype=np.int32)
@@ -106,8 +105,8 @@ def _dtw_numba(x: npt.NDArray[tuple[int, int], np.float32]) -> float:
     return cost[-1, -1] / _backtrace(trace)
 
 
-def dtw_numba(x: torch.Tensor) -> torch.Tensor:
-    return torch.tensor(_dtw_numba(x.numpy()))
+def dtw_numba(distances: torch.Tensor) -> torch.Tensor:
+    return torch.tensor(_dtw_numba(distances.cpu().numpy()), device=distances.device)
 
 
 @triton.jit
