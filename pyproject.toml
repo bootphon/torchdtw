@@ -30,6 +30,10 @@ dev = [
     "ruff>=0.14.2",
     "typos>=1.36.2",
 ]
+test = [
+    "hypothesis>=6.142.5",
+    "pytest>=8.4.2",
+]
 
 [tool.ruff]
 line-length = 119
