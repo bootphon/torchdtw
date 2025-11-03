@@ -8,21 +8,33 @@ __all__ = ["dtw", "dtw_batch"]
 
 
 def dtw(distances: torch.Tensor) -> torch.Tensor:
-    """Compute the DTW of the given ``distances`` 2D tensor.
+    """Compute the DTW cost of the given ``distances`` 2D tensor.
 
     :param distances: A 2D tensor of shape (n, m) representing the pairwise distances between two sequences.
+    :returns: A scalar tensor with the cost.
     """
     return torch.ops.torchdtw.dtw.default(distances)
 
 
+def dtw_path(distances: torch.Tensor) -> torch.Tensor:
+    """Compute the DTW path of the given ``distances`` 2D tensor.
+
+    No CUDA variant or batched implementation are provided for now.
+    :param distances: A 2D tensor of shape (n, m) representing the pairwise distances between two sequences.
+    :returns: A 2D tensor of shape (*, 2) with the path indices.
+    """
+    return torch.ops.torchdtw.dtw_path.default(distances.cpu()).to(distances.device)
+
+
 def dtw_batch(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, *, symmetric: bool) -> torch.Tensor:
-    """Compute the batched DTW on the ``distances`` 4D tensor.
+    """Compute the batched DTW cost on the ``distances`` 4D tensor.
 
     :param distances: A 4D tensor of shape (n1, n2, s1, s2) representing the pairwise distances between two
         batches of sequences.
     :param sx: A 1D tensor of shape (n1,) representing the lengths of the sequences in the first batch.
     :param sy: A 1D tensor of shape (n2,) representing the lengths of the sequences in the second batch.
     :param symmetric: Whether or not the DTW is symmetric (i.e., the two batches are the same).
+    :returns: A 2D tensor of shape (n1, n2) with the costs.
     """
     return torch.ops.torchdtw.dtw_batch.default(distances, sx, sy, symmetric)
 
