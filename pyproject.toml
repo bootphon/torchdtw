@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "torchdtw"
 version = "0.0.1"
-description = "Add your description here"
+description = "PyTorch DTW C++ extension"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [
@@ -32,8 +32,6 @@ line-length = 119
 select = ["ALL"]
 ignore = [
     "COM812",  # missing-trailing-comma
-    "D105",    # undocumented-magic-method
-    "D107",    # undocumented-public-init
     "D203",    # incorrect-blank-line-before-class
     "D213",    # multi-line-summary-second-line
     "N803",    # invalid-argument-name

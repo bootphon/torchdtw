@@ -1,4 +1,4 @@
-"""Additionnal implementations of DTW."""
+"""Additional implementations of DTW."""
 
 import numba
 import numpy as np

@@ -9,10 +9,7 @@ setup(
             "dtw_benchmark.dtw_cython",
             sources=["src/dtw_benchmark/dtw_cython.pyx"],
             define_macros=[("Py_LIMITED_API", 0x030C0000)],
-            extra_compile_args=[
-                "-O3",
-                "-DNPY_NO_DEPRECATED_API=NPY_2_0_API_VERSION",
-            ],
+            extra_compile_args=["-O3", "-DNPY_NO_DEPRECATED_API=NPY_2_0_API_VERSION"],
             include_dirs=[np.get_include()],
             py_limited_api=True,
         )
