@@ -1,5 +1,4 @@
 #include <Python.h>
-#include <omp.h>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
@@ -56,10 +55,9 @@ const std::vector<float> dtw_cost(
 }
 
 const std::vector<std::pair<int64_t, int64_t>> dtw_backtrack(
-  const std::vector<float>& cost,
-  const int64_t N,
-  const int64_t M
-) {
+    const std::vector<float>& cost,
+    const int64_t N,
+    const int64_t M) {
   std::vector<std::pair<int64_t, int64_t>> path;
   int64_t i = N - 1;
   int64_t j = M - 1;
@@ -90,12 +88,7 @@ const std::vector<std::pair<int64_t, int64_t>> dtw_backtrack(
   return path;
 }
 
-float dtw(
-    const float* distances,
-    const int64_t N,
-    const int64_t M,
-    const int64_t stride_x,
-    const int64_t stride_y) {
+float dtw(const float* distances, const int64_t N, const int64_t M, const int64_t stride_x, const int64_t stride_y) {
   const std::vector<float> cost = dtw_cost(distances, N, M, stride_x, stride_y);
   return cost.back() / dtw_backtrack(cost, N, M).size();
 }
@@ -113,22 +106,20 @@ Tensor dtw_cpu(const Tensor distances) {
 }
 
 Tensor dtw_path_cpu(const Tensor distances) {
-  const std::vector<float> cost =
-      dtw_cost(reinterpret_cast<const float*>(distances.data_ptr()),
-          distances.size(0),
-          distances.size(1),
-          distances.stride(0),
-          distances.stride(1));
+  const std::vector<float> cost = dtw_cost(
+      reinterpret_cast<const float*>(distances.data_ptr()),
+      distances.size(0),
+      distances.size(1),
+      distances.stride(0),
+      distances.stride(1));
   const std::vector<std::pair<int64_t, int64_t>> path = dtw_backtrack(cost, distances.size(0), distances.size(1));
   Tensor out = torch::stable::new_empty(distances, {(int64_t)path.size(), 2}, torch::headeronly::ScalarType::Long);
   std::memcpy(
-    reinterpret_cast<int64_t*>(out.data_ptr()),
-    reinterpret_cast<const int64_t*>(path.data()),
-    static_cast<size_t>(path.size() * 2) * sizeof(int64_t)
-  );
+      reinterpret_cast<int64_t*>(out.data_ptr()),
+      reinterpret_cast<const int64_t*>(path.data()),
+      static_cast<size_t>(path.size() * 2) * sizeof(int64_t));
   return out;
 }
-
 
 Tensor dtw_batch_cpu(const Tensor distances, const Tensor sx, const Tensor sy, bool symmetric) {
   const int64_t nx = distances.size(0);
@@ -140,36 +131,25 @@ Tensor dtw_batch_cpu(const Tensor distances, const Tensor sx, const Tensor sy, b
   const int64_t* sy_ptr = reinterpret_cast<const int64_t*>(sy.data_ptr());
   float* out_ptr = reinterpret_cast<float*>(out.data_ptr());
 
-#pragma omp parallel for schedule(dynamic)
-  for (int64_t i = 0; i < nx; i++) {
-    const int64_t start_j = symmetric ? i : 0;
-    for (int64_t j = start_j; j < ny; j++) {
-      if (symmetric && i == j)
-        continue;
-      out_ptr[i * ny + j] =
-          dtw(distances_ptr + i * distances.stride(0) + j * distances.stride(1),
-              sx_ptr[i],
-              sy_ptr[j],
-              distances.stride(2),
-              distances.stride(3));
-      if (symmetric && i != j) {
-        out_ptr[j * ny + i] = out_ptr[i * ny + j];
+  torch::stable::parallel_for(0, nx, 1, [&](int64_t start, int64_t end) {
+    for (int64_t i = start; i < end; i++) {
+      const int64_t start_j = symmetric ? i : 0;
+      for (int64_t j = start_j; j < ny; j++) {
+        if (symmetric && i == j)
+          continue;
+        out_ptr[i * ny + j] =
+            dtw(distances_ptr + i * distances.stride(0) + j * distances.stride(1),
+                sx_ptr[i],
+                sy_ptr[j],
+                distances.stride(2),
+                distances.stride(3));
+        if (symmetric && i != j) {
+          out_ptr[j * ny + i] = out_ptr[i * ny + j];
+        }
       }
     }
-  };
+  });
   return out;
-}
-
-void boxed_dtw_cpu(StableIValue* stack, uint64_t num_args, uint64_t num_outputs) {
-  stack[0] = from(dtw_cpu(to<Tensor>(stack[0])));
-}
-
-void boxed_dtw_path(StableIValue* stack, uint64_t num_args, uint64_t num_outputs) {
-  stack[0] = from(dtw_path_cpu(to<Tensor>(stack[0])));
-}
-
-void boxed_dtw_batch_cpu(StableIValue* stack, uint64_t num_args, uint64_t num_outputs) {
-  stack[0] = from(dtw_batch_cpu(to<Tensor>(stack[0]), to<Tensor>(stack[1]), to<Tensor>(stack[2]), to<bool>(stack[3])));
 }
 
 STABLE_TORCH_LIBRARY(torchdtw, m) {
@@ -179,9 +159,9 @@ STABLE_TORCH_LIBRARY(torchdtw, m) {
 }
 
 STABLE_TORCH_LIBRARY_IMPL(torchdtw, CPU, m) {
-  m.impl("dtw", &boxed_dtw_cpu);
-  m.impl("dtw_path", &boxed_dtw_path);
-  m.impl("dtw_batch", &boxed_dtw_batch_cpu);
+  m.impl("dtw", &TORCH_BOX(dtw_cpu));
+  m.impl("dtw_path", &TORCH_BOX(dtw_path));
+  m.impl("dtw_batch", &TORCH_BOX(dtw_batch_cpu));
 }
 
 } // namespace torchdtw

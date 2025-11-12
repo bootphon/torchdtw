@@ -19,11 +19,23 @@ authors = [
 ]
 keywords = ["machine learning"]
 license = "MIT"
-dependencies = ["numpy>=1.26.4", "torch>=2.9.0"]
+dependencies = [
+    "numpy>=1.26.4",
+    "torch>=2.9.0"
+]
+
+[project.optional-dependencies]
+test = [
+    "hypothesis>=6.142.5",
+    "pytest>=8.4.2",
+]
 
 [dependency-groups]
-dev = ["ipykernel>=7.1.0", "ruff>=0.14.2", "typos>=1.36.2"]
-test = ["hypothesis>=6.142.5", "pytest>=8.4.2"]
+dev = [
+    "ipykernel>=7.1.0",
+    "ruff>=0.14.2",
+    "typos>=1.36.2",
+]
 
 [tool.ruff]
 line-length = 119

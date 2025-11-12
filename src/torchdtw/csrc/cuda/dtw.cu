@@ -4,7 +4,7 @@
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
-// #include <torch/csrc/stable/tensor.h> // Fails to build if included here and in dtw.cpp
+#include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/util/Exception.h>
 #include <optional>
@@ -161,31 +161,13 @@ Tensor dtw_cuda(const Tensor distances) {
   torch::stable::fill_(sx, distances.size(0));
   Tensor sy = torch::stable::new_empty(distances, {1}, std::make_optional(torch::headeronly::ScalarType::Long));
   torch::stable::fill_(sy, distances.size(1));
-
-  AtenTensorHandle distances_ath;
-  const int64_t shape[4] = {1, 1, distances.size(0), distances.size(1)};
-  TORCH_ERROR_CODE_CHECK(aoti_torch_cuda_reshape(distances.get(), shape, 4, &distances_ath));
-  const Tensor distances_resized = Tensor(distances_ath);
-  Tensor result = dtw_batch_cuda(distances_resized, sx, sy, false);
-
-  AtenTensorHandle out_ath;
-  TORCH_ERROR_CODE_CHECK(aoti_torch_cuda_squeeze_dim(result.get(), 0, &out_ath));
-  TORCH_ERROR_CODE_CHECK(aoti_torch_cuda_squeeze_dim(out_ath, 0, &out_ath));
-  return Tensor(out_ath);
-}
-
-void boxed_dtw_cuda(StableIValue* stack, uint64_t num_args, uint64_t num_outputs) {
-  stack[0] = from(dtw_cuda(to<Tensor>(stack[0])));
-}
-
-void boxed_dtw_batch_cuda(StableIValue* stack, uint64_t num_args, uint64_t num_outputs) {
-  stack[0] =
-      from(dtw_batch_cuda(to<Tensor>(stack[0]), to<Tensor>(stack[1]), to<Tensor>(stack[2]), to<bool>(stack[3])));
+  Tensor result = dtw_batch_cuda(torch::stable::view(distances, {1, 1, distances.size(0), distances.size(1)}), sx, sy, false);
+  return torch::stable::view(result, {});
 }
 
 STABLE_TORCH_LIBRARY_IMPL(torchdtw, CUDA, m) {
-  m.impl("dtw", &boxed_dtw_cuda);
-  m.impl("dtw_batch", &boxed_dtw_batch_cuda);
+  m.impl("dtw", &TORCH_BOX(dtw_cuda));
+  m.impl("dtw_batch", &TORCH_BOX(dtw_batch_cuda));
 }
 
 } // namespace torchdtw

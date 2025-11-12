@@ -1,3 +1,4 @@
+# ruff: noqa: INP001
 """Build Cython DTW extension."""
 
 import numpy as np
