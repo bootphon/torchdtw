@@ -9,7 +9,7 @@ jobs:
   build:
     name: Build wheel
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         os: ["macos-14", "ubuntu-22.04", "windows-latest"]
     runs-on: ${{ matrix.os }}
@@ -68,7 +68,11 @@ jobs:
         run: |
           uv venv
           uv pip install setuptools numpy ninja
-          uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cu129
+          if [ ${{ runner.os != 'macOS' }} ]; then
+            uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cu129
+          else
+            uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cpu
+          fi
           uv build --wheel --no-build-isolation
 
       - name: Relabel the Linux wheel
