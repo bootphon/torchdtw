@@ -11,39 +11,15 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - { os: "macos-14",  torch-backend: "cpu" }
-          - { os: "ubuntu-22.04", torch-backend: "cpu" }
-          - { os: "ubuntu-22.04", torch-backend: "cu128" }
-          - { os: "ubuntu-22.04", torch-backend: "cu130" }
-          - { os: "windows-latest", torch-backend: "cpu" }
-          - { os: "windows-latest", torch-backend: "cu128" }
-          - { os: "windows-latest", torch-backend: "cu130" }
-    env:
-      GLIBC_VERSION: "2_34"
+        os: ["macos-14", "ubuntu-22.04", "windows-latest"]
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Check if this is the default version
-        shell: bash
-        run: |
-          DEFAULT_BACKEND=$(jq -rn '{"Linux": "cu128", "Windows": "cpu", "macOS": "cpu"}["${{ runner.os }}"]')
-          if [[ "${{ matrix.torch-backend }}" == "$DEFAULT_BACKEND" ]]; then
-            echo "IS_DEFAULT=true" >> $GITHUB_ENV
-          else
-            echo "IS_DEFAULT=false" >> $GITHUB_ENV
-          fi
-
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Get tag name
-        id: get_tag
-        shell: bash
-        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Install CUDA 12 on Linux
-        if: ${{ runner.os == 'Linux' && matrix.torch-backend != 'cpu' && matrix.torch-backend != 'cu130' }}
+      - name: Install CUDA 12.9 on Linux
+        if: ${{ runner.os == 'Linux' }}
         run: |
           wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
@@ -52,18 +28,8 @@ jobs:
           echo "CUDA_HOME=/usr/local/cuda-12.9" >> $GITHUB_ENV
           echo "/usr/local/cuda-12.9/bin" >> $GITHUB_PATH
 
-      - name: Install CUDA 13 on Linux
-        if: ${{ runner.os == 'Linux' && matrix.torch-backend == 'cu130' }}
-        run: |
-          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update
-          sudo apt-get -y install cuda-nvcc-13-0
-          echo "CUDA_HOME=/usr/local/cuda-13.0" >> $GITHUB_ENV
-          echo "/usr/local/cuda-13.0/bin" >> $GITHUB_PATH
-
-      - name: Install CUDA 12 on Windows
-        if: ${{ runner.os == 'Windows' && matrix.torch-backend != 'cpu' && matrix.torch-backend != 'cu130' }}
+      - name: Install CUDA 12.9 on Windows
+        if: ${{ runner.os == 'Windows' }}
         shell: pwsh
         run: |
           $downloadUrl = "https://developer.download.nvidia.com/compute/cuda/12.9.1/local_installers/cuda_12.9.1_576.57_windows.exe"
@@ -85,31 +51,8 @@ jobs:
           Write-Output "CUDA_HOME=$dst" >> $env:GITHUB_ENV
           Write-Output "$dst\bin" >> $env:GITHUB_PATH
 
-      - name: Install CUDA 13 on Windows
-        if: ${{ runner.os == 'Windows' && matrix.torch-backend == 'cu130' }}
-        shell: pwsh
-        run: |
-          $downloadUrl = "https://developer.download.nvidia.com/compute/cuda/13.0.2/local_installers/cuda_13.0.2_windows.exe"
-          $dst = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0"
-          New-Item -Path "cuda" -ItemType Directory
-          New-Item -Path $dst -ItemType Directory
-          & "C:\msys64\usr\bin\wget" $downloadUrl -O "cuda.exe" -q
-          & 'C:\Program Files\7-Zip\7z' x "cuda.exe" -o"cuda"
-          $directories = Get-ChildItem -Directory -Path "cuda"
-          foreach ($dir in $directories) {
-              $items = Get-ChildItem -Path (Join-Path "cuda" $dir.Name)
-              foreach ($item in $items) {
-                  if ($item.PSIsContainer) {
-                      Write-Output "$($item.FullName)"
-                      Copy-Item -Path "$($item.FullName)\*" -Destination $dst -Recurse -Force
-                  }
-              }
-          }
-          Write-Output "CUDA_HOME=$dst" >> $env:GITHUB_ENV
-          Write-Output "$dst\bin" >> $env:GITHUB_PATH
-
       - name: Check CUDA installation
-        if: ${{ matrix.torch-backend != 'cpu' }}
+        if: ${{ runner.os != 'Darwin' }}
         shell: bash
         run: |
           nvcc -V
@@ -124,29 +67,20 @@ jobs:
         shell: bash
         run: |
           uv venv
-          uv pip install setuptools numpy ninja torch --torch-backend ${{ matrix.torch-backend }}
-          uv build --wheel --package torchdtw --no-build-isolation
+          uv pip install setuptools numpy ninja
+          uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cu129
+          uv build --wheel --no-build-isolation
 
       - name: Relabel the Linux wheel
         if: runner.os == 'Linux'
         run: |
-          uvx --with patchelf auditwheel repair ./dist/*abi3-linux*.whl -w ./dist --plat manylinux_${GLIBC_VERSION}_x86_64 --exclude "libtorch*" --exclude "libc10*" --exclude "libcu*"
+          uvx --with patchelf auditwheel repair ./dist/*abi3-linux*.whl -w ./dist --plat manylinux_2_34_x86_64 --exclude "libtorch*" --exclude "libc10*" --exclude "libcu*"
           rm ./dist/*abi3-linux*.whl
-
-      - name: Copy the wheel with torch version and backend
-        shell: bash
-        run: |
-          wheel=$(ls ./dist/torchdtw-*.whl)
-          if [ "$IS_DEFAULT" = true ]; then
-            cp "$wheel" "${wheel/-cp/+${{ matrix.torch-backend }}-cp}"
-          else
-            mv "$wheel" "${wheel/-cp/+${{ matrix.torch-backend }}-cp}"
-          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.os }}-${{ matrix.torch-backend }}
+          name: dist-${{ matrix.os }}
           path: ./dist/*
 
   release:
@@ -162,10 +96,6 @@ jobs:
         with:
           version: "latest"
 
-      - name: Get tag name
-        id: get_tag
-        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -177,7 +107,7 @@ jobs:
           mv ./artifacts/**/*.whl ./dist
 
       - name: Build sdist
-        run: uv build --sdist --package torchdtw
+        run: uv build --sdist
 
       - name: List artifacts
         run: find ./dist
@@ -185,12 +115,7 @@ jobs:
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.get_tag.outputs.TAG_NAME }}
-        run: gh release create "$TAG" ./dist/*
-
-      - name: Remove non default wheels
-        run:
-          rm ./dist/*+*.whl
+        run: gh release create "${GITHUB_REF#refs/tags/}" ./dist/*
 
       - name: Upload to PyPI
         run: uv publish -t ${{ secrets.PYPI_TOKEN }}
