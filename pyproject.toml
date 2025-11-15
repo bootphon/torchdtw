@@ -1,41 +1,38 @@
-[build-system]
-requires = [
-    "setuptools>=80.9.0",
-    "torch>=2.9.0",
-    "numpy>=1.26.4",
-    "ninja>=1.11",
-]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "torchdtw"
 version = "0.0.1"
 description = "PyTorch DTW C++ extension"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
 authors = [
-    { name = "Maxime Poli" },
-    { name = "CoML", email = "dev@cognitive-ml.fr" },
+  { name = "Maxime Poli" },
+  { name = "CoML", email = "dev@cognitive-ml.fr" },
 ]
 keywords = ["machine learning"]
-license = "MIT"
-dependencies = [
-    "numpy>=1.26.4",
-    "torch>=2.9.0"
-]
+dependencies = ["numpy>=1.26.4", "torch>=2.9.0"]
 
 [project.optional-dependencies]
 test = [
-    "hypothesis>=6.142.5",
-    "pytest>=8.4.2",
+  "hypothesis>=6.142.5",
+  "pytest>=8.4.2",
 ]
 
 [dependency-groups]
 dev = [
-    "ipykernel>=7.1.0",
-    "ruff>=0.14.2",
-    "typos>=1.36.2",
+  "ipykernel>=7.1.0",
+  "ruff>=0.14.2",
+  "typos>=1.36.2",
 ]
+
+[build-system]
+requires = [
+  "ninja>=1.11",
+  "numpy>=1.26.4",
+  "setuptools>=80.9.0",
+  "torch>=2.9.0",
+]
+build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 line-length = 119
@@ -43,12 +40,12 @@ line-length = 119
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "COM812",  # missing-trailing-comma
-    "D203",    # incorrect-blank-line-before-class
-    "D213",    # multi-line-summary-second-line
-    "N803",    # invalid-argument-name
-    "N806",    # non-lowercase-variable-in-function
-    "PLR0913", # too-many-arguments
+  "COM812",  # missing-trailing-comma
+  "D203",  # incorrect-blank-line-before-class
+  "D213",  # multi-line-summary-second-line
+  "N803",  # invalid-argument-name
+  "N806",  # non-lowercase-variable-in-function
+  "PLR0913",  # too-many-arguments
 ]
 
 [tool.ruff.lint.pylint]
@@ -61,4 +58,7 @@ ignore-names = ["_check"]
 ignore-names = ["F"]
 
 [tool.uv.workspace]
-members = ["benchmark", "torchdtw"]
+members = [
+  "benchmark",
+  "torchdtw",
+]
