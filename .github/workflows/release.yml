@@ -64,16 +64,7 @@ jobs:
           version: "latest"
 
       - name: Build wheel
-        shell: bash
-        run: |
-          uv venv
-          uv pip install setuptools numpy ninja
-          if [ ${{ runner.os != 'macOS' }} ]; then
-            uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cu129
-          else
-            uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cpu
-          fi
-          uv build --wheel --no-build-isolation
+        run: uv build --wheel
 
       - name: Relabel the Linux wheel
         if: runner.os == 'Linux'
