@@ -160,7 +160,7 @@ STABLE_TORCH_LIBRARY(torchdtw, m) {
 
 STABLE_TORCH_LIBRARY_IMPL(torchdtw, CPU, m) {
   m.impl("dtw", &TORCH_BOX(dtw_cpu));
-  m.impl("dtw_path", &TORCH_BOX(dtw_path));
+  m.impl("dtw_path", &TORCH_BOX(dtw_path_cpu));
   m.impl("dtw_batch", &TORCH_BOX(dtw_batch_cpu));
 }
 

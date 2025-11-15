@@ -1,6 +1,5 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <torch/csrc/inductor/aoti_torch/generated/c_shim_cuda.h>
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
