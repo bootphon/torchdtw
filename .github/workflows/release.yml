@@ -52,7 +52,7 @@ jobs:
           Write-Output "$dst\bin" >> $env:GITHUB_PATH
 
       - name: Check CUDA installation
-        if: ${{ runner.os != 'Darwin' }}
+        if: ${{ runner.os != 'macOS' }}
         shell: bash
         run: |
           nvcc -V
