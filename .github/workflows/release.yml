@@ -34,6 +34,7 @@ jobs:
         run: |
           $downloadUrl = "https://developer.download.nvidia.com/compute/cuda/12.9.1/local_installers/cuda_12.9.1_576.57_windows.exe"
           $dst = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
+          New-Item -Path $dst -ItemType Directory -Force
           & "C:\msys64\usr\bin\wget" $downloadUrl -O "cuda.exe" -q
           & 'C:\Program Files\7-Zip\7z' x "cuda.exe" -o"cuda" -y cuda_nvcc/ cuda_cudart/ visual_studio_integration/ libnvjitlink/
           Copy-Item -Path "cuda\cuda_nvcc\nvcc\*" -Destination $dst -Recurse -Force
