@@ -9,27 +9,24 @@ from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CppExtension, C
 TORCH_CUDA_ARCH_LIST = "Volta;Turing;Ampere;Ada;Hopper;Blackwell"
 
 
-def get_openmp_flags() -> tuple[list[str], list[str]]:
-    """Return the compiler and linker flags for OpenMP."""
+def get_flags() -> tuple[list[str], list[str]]:
+    """Return the compiler and linker flags."""
     match sys.platform:
         case "linux":
-            compile_flags, link_flags = ["-fopenmp"], ["-fopenmp"]
+            return ["-fdiagnostics-color=always", "-O3", "-fopenmp"], ["-fopenmp"]
         case "win32":
-            compile_flags, link_flags = ["-openmp"], []
-        case _:  # On MacOS, we use the OpenMP version vendored by PyTorch
-            return [], []
-    return compile_flags, link_flags
+            return ["/O2", "/openmp"], []
+        case "darwin":  # On MacOS, we use the OpenMP version vendored by PyTorch
+            return ["-fdiagnostics-color=always", "-O3"], []
+    raise RuntimeError(sys.platform)
 
 
 def get_extension() -> Extension:
     """Either CUDA or CPU extension."""
     use_cuda = CUDA_HOME is not None
     extension = CUDAExtension if use_cuda else CppExtension
-    openmp_flags = get_openmp_flags()
-    extra_compile_args = {
-        "cxx": ["-fdiagnostics-color=always", "-O3", "-DTORCH_STABLE_ONLY"] + openmp_flags[0],
-        "nvcc": ["-O3"],
-    }
+    compiler_flags, linker_flags = get_flags()
+    extra_compile_args = {"cxx": ["-DTORCH_STABLE_ONLY", *compiler_flags], "nvcc": ["-O3"]}
     sources = ["src/torchdtw/csrc/dtw.cpp"]
     if use_cuda:
         os.environ["TORCH_CUDA_ARCH_LIST"] = TORCH_CUDA_ARCH_LIST
@@ -38,7 +35,7 @@ def get_extension() -> Extension:
         "torchdtw._C",
         sources,
         extra_compile_args=extra_compile_args,
-        extra_link_args=openmp_flags[1],
+        extra_link_args=linker_flags,
         py_limited_api=True,
     )
 
