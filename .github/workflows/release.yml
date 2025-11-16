@@ -36,7 +36,7 @@ jobs:
           $dst = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
           New-Item -Path $dst -ItemType Directory -Force
           & "C:\msys64\usr\bin\wget" $downloadUrl -O "cuda.exe" -q
-          & 'C:\Program Files\7-Zip\7z' x "cuda.exe" -o"cuda" -y cuda_nvcc/ cuda_cudart/ visual_studio_integration/ libnvjitlink/
+          & 'C:\Program Files\7-Zip\7z' x "cuda.exe" -o"cuda" -y cuda_nvcc/ cuda_cudart/ cuda_cccl/ visual_studio_integration/ libnvjitlink/
           Copy-Item -Path "cuda\cuda_nvcc\nvcc\*" -Destination $dst -Recurse -Force
           Copy-Item -Path "cuda\cuda_cudart\cudart\*" -Destination $dst -Recurse -Force
           Copy-Item -Path "cuda\cuda_cccl\thrust\*" -Destination $dst -Recurse -Force
