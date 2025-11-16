@@ -34,20 +34,12 @@ jobs:
         run: |
           $downloadUrl = "https://developer.download.nvidia.com/compute/cuda/12.9.1/local_installers/cuda_12.9.1_576.57_windows.exe"
           $dst = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
-          New-Item -Path "cuda" -ItemType Directory
-          New-Item -Path $dst -ItemType Directory
           & "C:\msys64\usr\bin\wget" $downloadUrl -O "cuda.exe" -q
-          & 'C:\Program Files\7-Zip\7z' x "cuda.exe" -o"cuda"
-          $directories = Get-ChildItem -Directory -Path "cuda"
-          foreach ($dir in $directories) {
-              $items = Get-ChildItem -Path (Join-Path "cuda" $dir.Name)
-              foreach ($item in $items) {
-                  if ($item.PSIsContainer) {
-                      Write-Output "$($item.FullName)"
-                      Copy-Item -Path "$($item.FullName)\*" -Destination $dst -Recurse -Force
-                  }
-              }
-          }
+          & 'C:\Program Files\7-Zip\7z' x "cuda.exe" -o"cuda" -y cuda_nvcc/ cuda_cudart/ visual_studio_integration/ libnvjitlink/
+          Copy-Item -Path "cuda\cuda_nvcc\nvcc\*" -Destination $dst -Recurse -Force
+          Copy-Item -Path "cuda\cuda_cudart\cudart\*" -Destination $dst -Recurse -Force
+          Copy-Item -Path "cuda\libnvjitlink\nvjitlink\*" -Destination $dst -Recurse -Force
+          Copy-Item -Path "cuda\visual_studio_integration\CUDAVisualStudioIntegration\*" -Destination $dst -Recurse -Force
           Write-Output "CUDA_HOME=$dst" >> $env:GITHUB_ENV
           Write-Output "$dst\bin" >> $env:GITHUB_PATH
 
