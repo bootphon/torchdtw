@@ -7,6 +7,7 @@ from setuptools import Extension, setup
 from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CppExtension, CUDAExtension
 
 TORCH_CUDA_ARCH_LIST = "Volta;Turing;Ampere;Ada;Hopper;Blackwell"
+TORCH_TARGET_VERSION = 0x020A000000000000
 
 
 def get_flags() -> tuple[list[str], list[str]]:
@@ -26,7 +27,7 @@ def get_extension() -> Extension:
     use_cuda = CUDA_HOME is not None
     extension = CUDAExtension if use_cuda else CppExtension
     compiler_flags, linker_flags = get_flags()
-    extra_compile_args = {"cxx": ["-DTORCH_STABLE_ONLY", *compiler_flags], "nvcc": ["-O3"]}
+    extra_compile_args = {"cxx": [f"-DTORCH_TARGET_VERSION={TORCH_TARGET_VERSION}", *compiler_flags], "nvcc": ["-O3"]}
     sources = ["src/torchdtw/csrc/dtw.cpp"]
     if use_cuda:
         os.environ["TORCH_CUDA_ARCH_LIST"] = TORCH_CUDA_ARCH_LIST
