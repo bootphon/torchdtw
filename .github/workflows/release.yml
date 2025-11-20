@@ -40,8 +40,6 @@ jobs:
           Copy-Item -Path "cuda\cuda_nvcc\nvcc\*" -Destination $dst -Recurse -Force
           Copy-Item -Path "cuda\cuda_cudart\cudart\*" -Destination $dst -Recurse -Force
           Copy-Item -Path "cuda\cuda_cccl\thrust\*" -Destination $dst -Recurse -Force
-          Copy-Item -Path "cuda\libnvjitlink\nvjitlink\*" -Destination $dst -Recurse -Force
-          Copy-Item -Path "cuda\visual_studio_integration\CUDAVisualStudioIntegration\*" -Destination $dst -Recurse -Force
           Write-Output "CUDA_HOME=$dst" >> $env:GITHUB_ENV
           Write-Output "$dst\bin" >> $env:GITHUB_PATH
 
