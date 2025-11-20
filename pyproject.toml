@@ -52,7 +52,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.pylint]
-allow-magic-value-types = ["int"]
+allow-magic-value-types = ["int", "str"]
 
 [tool.ruff.lint.flake8-self]
 ignore-names = ["_check"]
