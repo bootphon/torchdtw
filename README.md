@@ -51,12 +51,6 @@ No CUDA variant or batched implementation are provided for now.
 
 A 2D tensor of shape (*, 2) with the path indices.
 
-```python
-def dtw_batch(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, *, symmetric: bool) -> torch.Tensor
-```
-
-
-
 ### Batched DTW
 
 ```python
