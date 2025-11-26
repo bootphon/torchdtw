@@ -20,7 +20,7 @@ This package provides three functions:
 ### DTW
 
 ```python
-def dtw(distanes: torch.Tensor) -> torch.Tensor
+def dtw(distances: torch.Tensor) -> torch.Tensor
 ```
 
 Compute the DTW cost of the given ``distances`` 2D tensor.
@@ -57,7 +57,7 @@ def dtw_batch(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, *, sy
 
 
 
-#### Batched DTW
+### Batched DTW
 
 ```python
 def dtw_batch(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, *,
