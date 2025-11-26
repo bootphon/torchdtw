@@ -77,7 +77,21 @@ A 2D tensor of shape (n1, n2) with the costs.
 
 ## Benchmark
 
-See the benchmark here for comparisons against existing implementations.
-
+Check [this folder](https://github.com/mxmpl/torchdtw/tree/main/benchmark) for comparisons
+against reference implementations.
 
 ## Citation
+
+Please cite the fastabx paper if you use this package in your work:
+
+```bib
+@misc{fastabx,
+  title={fastabx: A library for efficient computation of ABX discriminability},
+  author={Maxime Poli and Emmanuel Chemla and Emmanuel Dupoux},
+  year={2025},
+  eprint={2505.02692},
+  archivePrefix={arXiv},
+  primaryClass={cs.CL},
+  url={https://arxiv.org/abs/2505.02692},
+}
+```
