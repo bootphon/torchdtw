@@ -1,17 +1,16 @@
 # PyTorch DTW C++ extension
 
-Simple DTW implementation in native PyTorch, with CPU and CUDA backends.
+Dynamic time warping in native PyTorch, with CPU and CUDA backends.
 
 ```bash
 pip install torchdtw
 ```
 
-Requires PyTorch >= 2.10.
-Developed using the PyTorch 2.10 Stable ABI, compiled with instructions for
-CUDA cards between Volta and Blackwell generations.
-
-Was developed for fastabx, but can be used in other projects.
-Exact version, no plans to add approximations or soft-DTW.
+This package requires PyTorch 2.10 or later. It is developed using the PyTorch
+2.10 Stable ABI, and compiled with instructions for CUDA cards from Volta to Blackwell.
+This was developed for the [fastabx](https://github.com/bootphon/fastabx), but
+it can be used in other projects. Only the exact DTW is implemented, there is
+no plan to add variants.
 
 ## Usage
  
