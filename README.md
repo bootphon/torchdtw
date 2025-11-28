@@ -8,7 +8,7 @@ pip install torchdtw
 
 This package requires PyTorch 2.10 or later. It is developed using the PyTorch
 2.10 Stable ABI, and compiled with instructions for CUDA cards from Volta to Blackwell.
-This was developed for the [fastabx](https://github.com/bootphon/fastabx), but
+This was originally made for [fastabx](https://github.com/bootphon/fastabx), but
 it can be used in other projects. Only the exact DTW is implemented, there is
 no plan to add variants.
 
