@@ -1,9 +1,9 @@
 #include <Python.h>
+#include <algorithm>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/util/Exception.h>
-#include <algorithm>
 #include <vector>
 
 extern "C" {
@@ -16,8 +16,8 @@ PyObject* PyInit__C(void) {
       PyModuleDef_HEAD_INIT,
       "_C", /* name of module */
       NULL, /* module documentation, may be NULL */
-      -1, /* size of per-interpreter state of the module,
-             or -1 if the module keeps state in global variables. */
+      -1,   /* size of per-interpreter state of the module,
+               or -1 if the module keeps state in global variables. */
       NULL, /* methods */
   };
   return PyModule_Create(&module_def);
@@ -28,12 +28,8 @@ namespace torchdtw {
 
 using torch::stable::Tensor;
 
-const std::vector<float> dtw_cost(
-    const float* distances,
-    const int64_t N,
-    const int64_t M,
-    const int64_t stride_x,
-    const int64_t stride_y) {
+const std::vector<float> dtw_cost(const float* distances, const int64_t N, const int64_t M, const int64_t stride_x,
+                                  const int64_t stride_y) {
   STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
   STD_TORCH_CHECK(stride_x > 0 && stride_y > 0, "Strides must be positive");
   std::vector<float> cost(N * M);
@@ -48,16 +44,14 @@ const std::vector<float> dtw_cost(
   for (int64_t i = 1; i < N; i++) {
     for (int64_t j = 1; j < M; j++) {
       cost[i * M + j] = distances[i * stride_x + j * stride_y] +
-          std::min({cost[(i - 1) * M + j], cost[(i - 1) * M + j - 1], cost[i * M + j - 1]});
+                        std::min({cost[(i - 1) * M + j], cost[(i - 1) * M + j - 1], cost[i * M + j - 1]});
     }
   }
   return cost;
 }
 
-const std::vector<std::pair<int64_t, int64_t>> dtw_backtrack(
-    const std::vector<float>& cost,
-    const int64_t N,
-    const int64_t M) {
+const std::vector<std::pair<int64_t, int64_t>> dtw_backtrack(const std::vector<float>& cost, const int64_t N,
+                                                             const int64_t M) {
   std::vector<std::pair<int64_t, int64_t>> path;
   int64_t i = N - 1;
   int64_t j = M - 1;
@@ -94,30 +88,20 @@ float dtw(const float* distances, const int64_t N, const int64_t M, const int64_
 }
 
 Tensor dtw_cpu(const Tensor distances) {
-  float result =
-      dtw(reinterpret_cast<const float*>(distances.data_ptr()),
-          distances.size(0),
-          distances.size(1),
-          distances.stride(0),
-          distances.stride(1));
+  float result = dtw(reinterpret_cast<const float*>(distances.data_ptr()), distances.size(0), distances.size(1),
+                     distances.stride(0), distances.stride(1));
   Tensor out = torch::stable::new_empty(distances, {});
   torch::stable::fill_(out, result);
   return out;
 }
 
 Tensor dtw_path_cpu(const Tensor distances) {
-  const std::vector<float> cost = dtw_cost(
-      reinterpret_cast<const float*>(distances.data_ptr()),
-      distances.size(0),
-      distances.size(1),
-      distances.stride(0),
-      distances.stride(1));
+  const std::vector<float> cost = dtw_cost(reinterpret_cast<const float*>(distances.data_ptr()), distances.size(0),
+                                           distances.size(1), distances.stride(0), distances.stride(1));
   const std::vector<std::pair<int64_t, int64_t>> path = dtw_backtrack(cost, distances.size(0), distances.size(1));
   Tensor out = torch::stable::new_empty(distances, {(int64_t)path.size(), 2}, torch::headeronly::ScalarType::Long);
-  std::memcpy(
-      reinterpret_cast<int64_t*>(out.data_ptr()),
-      reinterpret_cast<const int64_t*>(path.data()),
-      static_cast<size_t>(path.size() * 2) * sizeof(int64_t));
+  std::memcpy(reinterpret_cast<int64_t*>(out.data_ptr()), reinterpret_cast<const int64_t*>(path.data()),
+              static_cast<size_t>(path.size() * 2) * sizeof(int64_t));
   return out;
 }
 
@@ -137,12 +121,8 @@ Tensor dtw_batch_cpu(const Tensor distances, const Tensor sx, const Tensor sy, b
       for (int64_t j = start_j; j < ny; j++) {
         if (symmetric && i == j)
           continue;
-        out_ptr[i * ny + j] =
-            dtw(distances_ptr + i * distances.stride(0) + j * distances.stride(1),
-                sx_ptr[i],
-                sy_ptr[j],
-                distances.stride(2),
-                distances.stride(3));
+        out_ptr[i * ny + j] = dtw(distances_ptr + i * distances.stride(0) + j * distances.stride(1), sx_ptr[i],
+                                  sy_ptr[j], distances.stride(2), distances.stride(3));
         if (symmetric && i != j) {
           out_ptr[j * ny + i] = out_ptr[i * ny + j];
         }

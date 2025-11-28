@@ -1,12 +1,12 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <optional>
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/util/Exception.h>
-#include <optional>
 
 // Shared memory has a size of 48kB
 // Maximum diagonal length is N such that N * 3 * sizeof(float) = 48kB
@@ -14,26 +14,17 @@
 
 namespace torchdtw {
 
-template <int N>
-struct Int64Tuple {
+template <int N> struct Int64Tuple {
   const int64_t v[N];
 
-  __host__ __device__ const int64_t& operator[](int i) const {
-    return v[i];
-  }
+  __host__ __device__ const int64_t& operator[](int i) const { return v[i]; }
 };
 
 using torch::stable::Tensor;
 
-__global__ void dtw_wavefront_kernel(
-    float* cost,
-    const float* distances,
-    const int64_t* sx,
-    const int64_t* sy,
-    const bool symmetric,
-    const Int64Tuple<4> cost_sizes,
-    const Int64Tuple<4> cost_strides,
-    const Int64Tuple<4> distances_strides) {
+__global__ void dtw_wavefront_kernel(float* cost, const float* distances, const int64_t* sx, const int64_t* sy,
+                                     const bool symmetric, const Int64Tuple<4> cost_sizes,
+                                     const Int64Tuple<4> cost_strides, const Int64Tuple<4> distances_strides) {
   const int x = blockIdx.x;
   const int y = blockIdx.y;
   if (x >= cost_sizes[0] || y >= cost_sizes[1] || (symmetric && x >= y))
@@ -45,7 +36,7 @@ __global__ void dtw_wavefront_kernel(
 
   __shared__ float buffers[3][MAX_DIAG_LEN];
   int alpha = 0; // Last diagonal
-  int beta = 1; // Second to last diagonal
+  int beta = 1;  // Second to last diagonal
   int gamma = 2; // Buffer for the last diagonal
 
   for (int64_t diag = 0; diag <= N + M - 1; diag++) {
@@ -73,15 +64,9 @@ __global__ void dtw_wavefront_kernel(
   }
 }
 
-__global__ void dtw_backtrack_kernel(
-    float* out,
-    const float* cost,
-    const int64_t* sx,
-    const int64_t* sy,
-    const bool symmetric,
-    const Int64Tuple<2> out_strides,
-    const Int64Tuple<4> cost_sizes,
-    const Int64Tuple<4> cost_strides) {
+__global__ void dtw_backtrack_kernel(float* out, const float* cost, const int64_t* sx, const int64_t* sy,
+                                     const bool symmetric, const Int64Tuple<2> out_strides,
+                                     const Int64Tuple<4> cost_sizes, const Int64Tuple<4> cost_strides) {
   const int x = blockIdx.x;
   const int y = blockIdx.y;
   if (x >= cost_sizes[0] || y >= cost_sizes[1] || (symmetric && x >= y))
@@ -135,22 +120,14 @@ Tensor dtw_batch_cuda(const Tensor distances, const Tensor sx, const Tensor sy, 
   cudaStream_t stream = (cudaStream_t)torch::stable::accelerator::getCurrentStream(device_idx).id();
 
   dtw_wavefront_kernel<<<num_blocks, num_threads, 0, stream>>>(
-      reinterpret_cast<float*>(cost.data_ptr()),
-      reinterpret_cast<const float*>(distances.data_ptr()),
-      reinterpret_cast<const int64_t*>(sx.data_ptr()),
-      reinterpret_cast<const int64_t*>(sy.data_ptr()),
-      symmetric,
-      {nx, ny, max_x, max_y},
-      {cost.stride(0), cost.stride(1), cost.stride(2), cost.stride(3)},
+      reinterpret_cast<float*>(cost.data_ptr()), reinterpret_cast<const float*>(distances.data_ptr()),
+      reinterpret_cast<const int64_t*>(sx.data_ptr()), reinterpret_cast<const int64_t*>(sy.data_ptr()), symmetric,
+      {nx, ny, max_x, max_y}, {cost.stride(0), cost.stride(1), cost.stride(2), cost.stride(3)},
       {distances.stride(0), distances.stride(1), distances.stride(2), distances.stride(3)});
   dtw_backtrack_kernel<<<num_blocks, 1, 0, stream>>>(
-      reinterpret_cast<float*>(out.data_ptr()),
-      reinterpret_cast<const float*>(cost.data_ptr()),
-      reinterpret_cast<const int64_t*>(sx.data_ptr()),
-      reinterpret_cast<const int64_t*>(sy.data_ptr()),
-      symmetric,
-      {out.stride(0), out.stride(1)},
-      {nx, ny, max_x, max_y},
+      reinterpret_cast<float*>(out.data_ptr()), reinterpret_cast<const float*>(cost.data_ptr()),
+      reinterpret_cast<const int64_t*>(sx.data_ptr()), reinterpret_cast<const int64_t*>(sy.data_ptr()), symmetric,
+      {out.stride(0), out.stride(1)}, {nx, ny, max_x, max_y},
       {cost.stride(0), cost.stride(1), cost.stride(2), cost.stride(3)});
   return out;
 }
@@ -160,7 +137,8 @@ Tensor dtw_cuda(const Tensor distances) {
   torch::stable::fill_(sx, distances.size(0));
   Tensor sy = torch::stable::new_empty(distances, {1}, std::make_optional(torch::headeronly::ScalarType::Long));
   torch::stable::fill_(sy, distances.size(1));
-  Tensor result = dtw_batch_cuda(torch::stable::view(distances, {1, 1, distances.size(0), distances.size(1)}), sx, sy, false);
+  Tensor result =
+      dtw_batch_cuda(torch::stable::view(distances, {1, 1, distances.size(0), distances.size(1)}), sx, sy, false);
   return torch::stable::view(result, {});
 }
 
