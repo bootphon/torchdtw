@@ -171,7 +171,7 @@ def dtw_triton(x: torch.Tensor) -> torch.Tensor:
         trace.stride(0),
         N,
         M,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_SIZE=BLOCK_SIZE,  # ty: ignore[invalid-argument-type]
     )
     trace = trace.T.flatten()[: (M + 1) * (M + N + 3)].reshape(M + 1, M + N + 3)[:, : N + 1]
     flat_index = M * (M + N + 3) + N
