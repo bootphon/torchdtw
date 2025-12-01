@@ -71,9 +71,6 @@ batches of sequences.
 
 A 2D tensor of shape (n1, n2) with the costs.
 
-## Implementation
-
-
 ## Benchmark
 
 Check [this folder](https://github.com/mxmpl/torchdtw/tree/main/benchmark) for comparisons
