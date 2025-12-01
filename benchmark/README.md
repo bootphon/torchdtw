@@ -1,7 +1,8 @@
 # DTW benchmark
 
 Small benchmark to compare various exact DTW implementations.
-Submit a PR if you want to add another one!
+We verify that all outputs are identical.
+Submit a PR if you want to add another implementation!
 
 Available implementations:
 - PyTorch naive: inefficient PyTorch implementation without any parallelization.
