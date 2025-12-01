@@ -62,7 +62,7 @@ def dtw_cython_batch(
 
 
 @numba.jit(nopython=True)
-def _backtrace(trace: npt.NDArray) -> float:
+def _backtrace(trace: npt.NDArray[np.float32]) -> float:
     i = trace.shape[0] - 1
     j = trace.shape[1] - 1
     path_len = 0
@@ -87,7 +87,7 @@ def _backtrace(trace: npt.NDArray) -> float:
 
 
 @numba.jit(nopython=True, parallel=True)
-def _dtw_numba(x: npt.NDArray) -> float:
+def _dtw_numba(x: npt.NDArray[np.float32]) -> float:
     N, M = x.shape
     cost = np.ones((N + 1, M + 1), dtype=np.float32) * np.inf
     trace = -np.ones((N + 1, M + 1), dtype=np.int32)

@@ -1,5 +1,16 @@
 # DTW benchmark
 
+Small benchmark to compare various exact DTW implementations.
+Submit a PR if you want to add another one!
+
+Available implementations:
+- PyTorch naive: inefficient PyTorch implementation without any parallelization.
+- Cython: convert to numpy array, cython backend for cost computation, then back to PyTorch.
+- Numba: adapted from Whisper.
+- Triton: adapter from Whisper, CUDA only.
+- PyTorch C++ extension: functions from `torchdtw`.
+
+Computation time for DTW on array of shape (n, n), on one A40 GPU:
 
 ```
 [--------------------------------------- cpu ----------------------------------------]
