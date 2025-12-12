@@ -6,6 +6,7 @@
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/core/TensorAccessor.h>
 #include <torch/headeronly/util/Exception.h>
 
 // Shared memory has a size of 48kB
