@@ -14,25 +14,27 @@
 
 namespace torchdtw {
 
-template <int N> struct Int64Tuple {
-  const int64_t v[N];
-
-  __host__ __device__ const int64_t& operator[](int i) const { return v[i]; }
-};
-
 using torch::stable::Tensor;
+template <typename T, size_t N>
+using PackedTensorAccessor32 =
+    torch::headeronly::HeaderOnlyGenericPackedTensorAccessor<T, N, torch::headeronly::RestrictPtrTraits, int32_t>;
+template <typename T, size_t N> inline PackedTensorAccessor32<T, N> packed_accessor32(torch::stable::Tensor t) {
+  return PackedTensorAccessor32<T, N>(static_cast<typename PackedTensorAccessor32<T, N>::PtrType>(t.data_ptr()),
+                                      t.sizes().data(), t.strides().data());
+}
 
-__global__ void dtw_wavefront_kernel(float* cost, const float* distances, const int64_t* sx, const int64_t* sy,
-                                     const bool symmetric, const Int64Tuple<4> cost_sizes,
-                                     const Int64Tuple<4> cost_strides, const Int64Tuple<4> distances_strides) {
+__global__ void dtw_wavefront_kernel(PackedTensorAccessor32<float, 4> cost,
+                                     const PackedTensorAccessor32<float, 4> distances,
+                                     const PackedTensorAccessor32<int64_t, 1> sx,
+                                     const PackedTensorAccessor32<int64_t, 1> sy, bool symmetric) {
   const int x = blockIdx.x;
   const int y = blockIdx.y;
-  if (x >= cost_sizes[0] || y >= cost_sizes[1] || (symmetric && x >= y))
+  if (x >= cost.size(0) || y >= cost.size(1))
+    return;
+  if (symmetric && x >= y)
     return;
   const int64_t N = sx[x];
   const int64_t M = sy[y];
-  const float* d = distances + (x * distances_strides[0] + y * distances_strides[1]);
-  float* c = cost + (x * cost_strides[0] + y * cost_strides[1]);
 
   __shared__ float buffers[3][MAX_DIAG_LEN];
   int alpha = 0; // Last diagonal
@@ -51,8 +53,8 @@ __global__ void dtw_wavefront_kernel(float* cost, const float* distances, const 
       const float c_left = (j > 0) ? buffers[alpha][j - 1] : FLT_MAX;
       const float c_diag = (i > 0 && j > 0) ? buffers[beta][j - 1] : FLT_MAX;
       const float min_cost = (i == 0 && j == 0) ? 0 : fminf(c_left, fminf(c_diag, c_up));
-      const float cij = min_cost + d[i * distances_strides[2] + j * distances_strides[3]];
-      c[i * cost_strides[2] + j * cost_strides[3]] = cij;
+      const float cij = distances[x][y][i][j] + min_cost;
+      cost[x][y][i][j] = cij;
       buffers[gamma][j] = cij;
     }
     __syncthreads();
@@ -64,24 +66,25 @@ __global__ void dtw_wavefront_kernel(float* cost, const float* distances, const 
   }
 }
 
-__global__ void dtw_backtrack_kernel(float* out, const float* cost, const int64_t* sx, const int64_t* sy,
-                                     const bool symmetric, const Int64Tuple<2> out_strides,
-                                     const Int64Tuple<4> cost_sizes, const Int64Tuple<4> cost_strides) {
+__global__ void dtw_backtrack_kernel(PackedTensorAccessor32<float, 2> out, const PackedTensorAccessor32<float, 4> cost,
+                                     const PackedTensorAccessor32<int64_t, 1> sx,
+                                     const PackedTensorAccessor32<int64_t, 1> sy, bool symmetric) {
   const int x = blockIdx.x;
   const int y = blockIdx.y;
-  if (x >= cost_sizes[0] || y >= cost_sizes[1] || (symmetric && x >= y))
+  if (x >= cost.size(0) || y >= cost.size(1))
+    return;
+  if (symmetric && x >= y)
     return;
   const int64_t N = sx[x];
   const int64_t M = sy[y];
-  const float* c = cost + (x * cost_strides[0] + y * cost_strides[1]);
 
   int64_t path_len = 1;
   int64_t i = N - 1;
   int64_t j = M - 1;
   while (i > 0 && j > 0) {
-    const float c_up = c[(i - 1) * cost_strides[2] + j * cost_strides[3]];
-    const float c_left = c[i * cost_strides[2] + (j - 1) * cost_strides[3]];
-    const float c_diag = c[(i - 1) * cost_strides[2] + (j - 1) * cost_strides[3]];
+    const float c_up = cost[x][y][i - 1][j];
+    const float c_left = cost[x][y][i][j - 1];
+    const float c_diag = cost[x][y][i - 1][j - 1];
     if (c_diag <= c_left && c_diag <= c_up) {
       i--;
       j--;
@@ -97,9 +100,9 @@ __global__ void dtw_backtrack_kernel(float* out, const float* cost, const int64_
   if (j == 0)
     path_len += i;
 
-  out[x * out_strides[0] + y * out_strides[1]] = c[(N - 1) * cost_strides[2] + (M - 1) * cost_strides[3]] / path_len;
+  out[x][y] = cost[x][y][N - 1][M - 1] / path_len;
   if (symmetric)
-    out[y * out_strides[0] + x * out_strides[1]] = out[x * out_strides[0] + y * out_strides[1]];
+    out[y][x] = out[x][y];
 }
 
 Tensor dtw_batch_cuda(const Tensor distances, const Tensor sx, const Tensor sy, bool symmetric) {
@@ -120,15 +123,11 @@ Tensor dtw_batch_cuda(const Tensor distances, const Tensor sx, const Tensor sy, 
   cudaStream_t stream = (cudaStream_t)torch::stable::accelerator::getCurrentStream(device_idx).id();
 
   dtw_wavefront_kernel<<<num_blocks, num_threads, 0, stream>>>(
-      reinterpret_cast<float*>(cost.data_ptr()), reinterpret_cast<const float*>(distances.data_ptr()),
-      reinterpret_cast<const int64_t*>(sx.data_ptr()), reinterpret_cast<const int64_t*>(sy.data_ptr()), symmetric,
-      {nx, ny, max_x, max_y}, {cost.stride(0), cost.stride(1), cost.stride(2), cost.stride(3)},
-      {distances.stride(0), distances.stride(1), distances.stride(2), distances.stride(3)});
+      packed_accessor32<float, 4>(cost), packed_accessor32<float, 4>(distances), packed_accessor32<int64_t, 1>(sx),
+      packed_accessor32<int64_t, 1>(sy), symmetric);
   dtw_backtrack_kernel<<<num_blocks, 1, 0, stream>>>(
-      reinterpret_cast<float*>(out.data_ptr()), reinterpret_cast<const float*>(cost.data_ptr()),
-      reinterpret_cast<const int64_t*>(sx.data_ptr()), reinterpret_cast<const int64_t*>(sy.data_ptr()), symmetric,
-      {out.stride(0), out.stride(1)}, {nx, ny, max_x, max_y},
-      {cost.stride(0), cost.stride(1), cost.stride(2), cost.stride(3)});
+      packed_accessor32<float, 2>(out), packed_accessor32<float, 4>(cost), packed_accessor32<int64_t, 1>(sx),
+      packed_accessor32<int64_t, 1>(sy), symmetric);
   return out;
 }
 
