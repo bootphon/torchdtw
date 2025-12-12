@@ -70,8 +70,6 @@ jobs:
           uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cpu
 
       - name: Build wheel
-        env:
-          TORCH_CUDA_ARCH_LIST: "Volta;Turing;Ampere;Ada;Hopper;Blackwell"
         run: uv build --wheel --no-build-isolation
 
       - name: Relabel the Linux wheel

@@ -1,5 +1,6 @@
 """Build the DTW PyTorch C++ extension."""
 
+import os
 import sys
 
 from setuptools import Extension, setup
@@ -20,6 +21,8 @@ def get_flags() -> tuple[list[str], list[str]]:
 
 def get_extension() -> Extension:
     """Either CUDA or CPU extension."""
+    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "Volta;Turing;Ampere;Ada;Hopper;Blackwell"
     use_cuda = CUDA_HOME is not None
     extension = CUDAExtension if use_cuda else CppExtension
     sources = ["src/torchdtw/csrc/dtw.cpp"] + (["src/torchdtw/csrc/cuda/dtw.cu"] if use_cuda else [])
