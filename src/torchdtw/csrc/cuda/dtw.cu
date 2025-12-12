@@ -106,7 +106,7 @@ __global__ void dtw_backtrack_kernel(PackedTensorAccessor32<float, 2> out, const
     out[y][x] = out[x][y];
 }
 
-Tensor dtw_batch_cuda(const Tensor distances, const Tensor sx, const Tensor sy, bool symmetric) {
+Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
   const int64_t nx = distances.size(0);
   const int64_t ny = distances.size(1);
   const int64_t max_x = distances.size(2);
@@ -132,7 +132,7 @@ Tensor dtw_batch_cuda(const Tensor distances, const Tensor sx, const Tensor sy, 
   return out;
 }
 
-Tensor dtw_cuda(const Tensor distances) {
+Tensor dtw_cuda(const Tensor& distances) {
   Tensor sx = torch::stable::new_empty(distances, {1}, std::make_optional(torch::headeronly::ScalarType::Long));
   torch::stable::fill_(sx, distances.size(0));
   Tensor sy = torch::stable::new_empty(distances, {1}, std::make_optional(torch::headeronly::ScalarType::Long));
