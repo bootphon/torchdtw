@@ -116,7 +116,7 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
   STD_TORCH_CHECK(max_x < MAX_DIAG_LEN, "Diagonal too large to use CUDA shared memory");
 
   Tensor cost = torch::stable::new_zeros(distances, {nx, ny, max_x, max_y});
-  Tensor out = torch::stable::new_empty(distances, {nx, ny});
+  Tensor out = torch::stable::new_zeros(distances, {nx, ny});
 
   const dim3 num_blocks(nx, ny);
   const int num_threads = max_x > 1024 ? 1024 : max_x;
