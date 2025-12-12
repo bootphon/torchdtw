@@ -36,7 +36,7 @@ def test_dtw(x: int, y: int, low: float, high_minus_low: float) -> None:
 def test_dtw_batch_symmetric(n: int, x: int, low: float, high_minus_low: float) -> None:
     """Compare the output of dtw_batch between CPU and GPU implementations, symmetric case."""
     d = make_tensor((n, n, x, x), dtype=torch.float32, low=low, high=high_minus_low + low)
-    sx = make_tensor((n,), dtype=torch.long, low=1, high=x)
+    sx = make_tensor((n,), dtype=torch.long, low=1, high=x + 1)
     i, j = torch.triu_indices(n, n)
     d[i, j] = d[j, i]
     torch.testing.assert_close(
@@ -53,8 +53,8 @@ def test_dtw_batch_symmetric(n: int, x: int, low: float, high_minus_low: float) 
 def test_dtw_batch_not_symmetric(n: int, m: int, x: int, y: int, low: float, high_minus_low: float) -> None:
     """Compare the output of dtw_batch between CPU and GPU implementations, non symmetric case."""
     d = make_tensor((n, m, x, y), dtype=torch.float32, low=low, high=high_minus_low + low)
-    sx = make_tensor((n,), dtype=torch.long, low=1, high=x)
-    sy = make_tensor((m,), dtype=torch.long, low=1, high=y)
+    sx = make_tensor((n,), dtype=torch.long, low=1, high=x + 1)
+    sy = make_tensor((m,), dtype=torch.long, low=1, high=y + 1)
     torch.testing.assert_close(
         dtw_batch(d, sx, sy, symmetric=False),
         dtw_batch(d.cuda(), sx.cuda(), sy.cuda(), symmetric=False).cpu(),
