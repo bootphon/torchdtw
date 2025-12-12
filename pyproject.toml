@@ -10,7 +10,9 @@ authors = [
   { name = "CoML", email = "dev@cognitive-ml.fr" },
 ]
 keywords = ["machine learning"]
-dependencies = ["torch>=2.9.0"]
+dependencies = [
+  "torch>=2.10.0",
+]
 
 [project.optional-dependencies]
 test = [
@@ -30,7 +32,7 @@ requires = [
   "ninja>=1.11",
   "numpy>=1.26.4",
   "setuptools>=80.9.0",
-  "torch>=2.9.0",
+  "torch>=2.10.0",
 ]
 build-backend = "setuptools.build_meta"
 
