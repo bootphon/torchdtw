@@ -22,7 +22,7 @@ def get_flags() -> tuple[list[str], list[str]]:
 def get_extension() -> Extension:
     """Either CUDA or CPU extension."""
     if "TORCH_CUDA_ARCH_LIST" not in os.environ:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "Volta;Turing;Ampere;Ada;Hopper;Blackwell"
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "7.0;7.5;8.0;8.6;9.0;10.0;12.0+PTX"
     use_cuda = CUDA_HOME is not None
     extension = CUDAExtension if use_cuda else CppExtension
     sources = ["src/torchdtw/csrc/dtw.cpp"] + (["src/torchdtw/csrc/cuda/dtw.cu"] if use_cuda else [])
