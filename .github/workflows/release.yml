@@ -11,7 +11,7 @@ jobs:
     name: Linters
     runs-on: ubuntu-latest
     permissions:
-      contents: read # Fetch repository
+      security-events: write # Required for upload-sarif (used by zizmor-action) to upload SARIF files.
     steps:
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -19,7 +19,7 @@ jobs:
           persist-credentials: false
 
       - name: zizmor
-        uses: zizmorcore/zizmor-action@e639db99335bc9038abc0e066dfcd72e23d26fb4 # v0.3.0
+        uses: zizmorcore/zizmor-action@135698455da5c3b3e55f73f4419e481ab68cdd95 # v0.4.1
 
       - name: typos
         uses: crate-ci/typos@2d0ce569feab1f8752f1dde43cc2f2aa53236e06 # v1.40.0
@@ -36,7 +36,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: lint
     permissions:
-      contents: read # Fetch repository
       actions: write # Upload artifact
     steps:
       - name: Checkout code
@@ -103,7 +102,6 @@ jobs:
     name: Build sdist
     runs-on: ubuntu-latest
     permissions:
-      contents: read # Fetch repository
       actions: write # Upload artifact
     needs: lint
     steps:
