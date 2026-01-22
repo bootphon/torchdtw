@@ -9,6 +9,18 @@ authors = [
   { name = "CoML", email = "dev@cognitive-ml.fr" },
 ]
 keywords = ["machine learning"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
   "torch>=2.10.0",
 ]
@@ -44,6 +56,7 @@ line-length = 119
 select = ["ALL"]
 ignore = [
   "COM812",  # missing-trailing-comma
+  "D107",  # undocumented-public-init
   "D203",  # incorrect-blank-line-before-class
   "D213",  # multi-line-summary-second-line
   "N803",  # invalid-argument-name

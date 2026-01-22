@@ -82,22 +82,10 @@ jobs:
           version: "latest"
           enable-cache: false
 
-      - name: Install dependencies on Linux and Windows
-        if: runner.os != 'macOS'
-        run: |
-          uv venv
-          uv pip install setuptools numpy ninja
-          uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cu128
-
-      - name: Install dependencies on macOS
-        if: runner.os == 'macOS'
-        run: |
-          uv venv
-          uv pip install setuptools numpy ninja
-          uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cpu
-
       - name: Build wheel
-        run: uv build --wheel --no-build-isolation
+        env:
+          TORCH_CUDA_ARCH_LIST: "7.0;7.5;8.0;8.6;9.0;10.0;12.0+PTX"
+        run: uv build --wheel
 
       - name: Relabel the Linux wheel
         if: runner.os == 'Linux'

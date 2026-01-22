@@ -19,11 +19,22 @@ def get_flags() -> tuple[list[str], list[str]]:
     raise RuntimeError(sys.platform)
 
 
+class CUDAArchListError(RuntimeError):
+    """To raise if CUDA is found and TORCH_CUDA_ARCH_LIST is not set."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "You must explicitly set TORCH_CUDA_ARCH_LIST to build from source if CUDA is found.\n"
+            "Check you supported gpu architectures beforehand.\n"
+            "For example: TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;9.0;10.0;12.0+PTX'"
+        )
+
+
 def get_extension() -> Extension:
     """Either CUDA or CPU extension."""
-    if "TORCH_CUDA_ARCH_LIST" not in os.environ:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "7.0;7.5;8.0;8.6;9.0;10.0;12.0+PTX"
     use_cuda = CUDA_HOME is not None
+    if use_cuda and "TORCH_CUDA_ARCH_LIST" not in os.environ:
+        raise CUDAArchListError
     extension = CUDAExtension if use_cuda else CppExtension
     sources = ["src/torchdtw/csrc/dtw.cpp"] + (["src/torchdtw/csrc/cuda/dtw.cu"] if use_cuda else [])
     compiler_flags, linker_flags = get_flags()
