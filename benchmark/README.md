@@ -11,6 +11,11 @@ Available implementations:
 - Triton: adapter from Whisper, CUDA only.
 - PyTorch C++ extension: functions from `torchdtw`.
 
+Run with:
+```bash
+python -m dtw_benchmark
+```
+
 Computation time for DTW on array of shape (n, n), on one A40 GPU:
 
 ```
