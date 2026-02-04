@@ -81,10 +81,17 @@ jobs:
           version: "latest"
           enable-cache: false
 
+      - name: Install dependencies # Needed to get CUDA wheel on Windows
+        env:
+          UV_TORCH_BACKEND: ${{ runner.os == 'macOS' && 'cpu' || 'cu128' }}
+        run: |
+          uv venv
+          uv pip install ninja numpy setuptools setuptools-scm torch
+
       - name: Build wheel
         env:
           TORCH_CUDA_ARCH_LIST: "7.0;7.5;8.0;8.6;9.0;10.0;12.0+PTX"
-        run: uv build --wheel
+        run: uv build --wheel --no-build-isolation
 
       - name: Relabel the Linux wheel
         if: runner.os == 'Linux'
