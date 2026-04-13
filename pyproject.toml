@@ -76,6 +76,15 @@ ignore-names = ["F"]
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"
 
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "setup.py" },
+  { file = "src/torchdtw/csrc/dtw.cpp" },
+  { file = "src/torchdtw/csrc/cuda/dtw.cu" },
+  { file = "benchmark/src/dtw_benchmark/dtw_cython.pyx" },
+]
+
 [tool.uv.workspace]
 members = [
   "benchmark",
