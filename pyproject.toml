@@ -32,13 +32,6 @@ test = [
   "pytest>=8.4.2",
 ]
 
-[dependency-groups]
-dev = [
-  "ipykernel>=7.1.0",
-  "ruff>=0.14.2",
-  "typos>=1.36.2",
-]
-
 [build-system]
 requires = [
   "ninja>=1.11",
