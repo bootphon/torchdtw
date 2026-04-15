@@ -1,10 +1,22 @@
 """DTW implementation using PyTorch C++ extensions, with CPU and CUDA backends."""
 
+import sys
+
 import torch
 
 from . import _C  # noqa: F401 # ty: ignore[unresolved-import]
 
 __all__ = ["dtw", "dtw_batch"]
+
+
+class CUDAOnWindowsError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("torchdtw was built without CUDA support on Windows. Move your tensors to CPU first.")
+
+
+def _check_no_cuda_on_windows(tensor: torch.Tensor) -> None:
+    if sys.platform == "win32" and tensor.is_cuda:
+        raise CUDAOnWindowsError
 
 
 def dtw(distances: torch.Tensor) -> torch.Tensor:
@@ -13,6 +25,7 @@ def dtw(distances: torch.Tensor) -> torch.Tensor:
     :param distances: A 2D tensor of shape (n, m) representing the pairwise distances between two sequences.
     :returns: A scalar tensor with the cost.
     """
+    _check_no_cuda_on_windows(distances)
     return torch.ops.torchdtw.dtw.default(distances)
 
 
@@ -36,6 +49,7 @@ def dtw_batch(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, *, sy
     :param symmetric: Whether or not the DTW is symmetric (i.e., the two batches are the same).
     :returns: A 2D tensor of shape (n1, n2) with the costs.
     """
+    _check_no_cuda_on_windows(distances)
     return torch.ops.torchdtw.dtw_batch.default(distances, sx, sy, symmetric)
 
 

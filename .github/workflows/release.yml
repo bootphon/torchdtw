@@ -40,33 +40,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install CUDA 12.9 on Linux
+      - name: Install CUDA 13.0 on Linux
         if: runner.os == 'Linux'
         run: |
           wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          sudo apt-get -y install cuda-nvcc-12-9
-          echo "CUDA_HOME=/usr/local/cuda-12.9" >> $GITHUB_ENV
-          echo "/usr/local/cuda-12.9/bin" >> $GITHUB_PATH
-
-      - name: Install CUDA 12.9 on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $downloadUrl = "https://developer.download.nvidia.com/compute/cuda/12.9.1/local_installers/cuda_12.9.1_576.57_windows.exe"
-          $dst = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
-          New-Item -Path $dst -ItemType Directory -Force
-          & "C:\msys64\usr\bin\wget" $downloadUrl -O "cuda.exe" -q
-          & 'C:\Program Files\7-Zip\7z' x "cuda.exe" -o"cuda" -y cuda_nvcc/ cuda_cudart/ cuda_cccl/ visual_studio_integration/ libnvjitlink/
-          Copy-Item -Path "cuda\cuda_nvcc\nvcc\*" -Destination $dst -Recurse -Force
-          Copy-Item -Path "cuda\cuda_cudart\cudart\*" -Destination $dst -Recurse -Force
-          Copy-Item -Path "cuda\cuda_cccl\thrust\*" -Destination $dst -Recurse -Force
-          Write-Output "CUDA_HOME=$dst" >> $env:GITHUB_ENV
-          Write-Output "$dst\bin" >> $env:GITHUB_PATH
+          sudo apt-get -y install cuda-nvcc-13-0
+          echo "CUDA_HOME=/usr/local/cuda-13.0" >> $GITHUB_ENV
+          echo "/usr/local/cuda-13.0/bin" >> $GITHUB_PATH
 
       - name: Check CUDA installation
-        if: runner.os != 'macOS'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           nvcc -V
@@ -78,17 +63,10 @@ jobs:
           version: "latest"
           enable-cache: false
 
-      - name: Install dependencies # Needed to get CUDA wheel on Windows
-        env:
-          UV_TORCH_BACKEND: ${{ runner.os == 'macOS' && 'cpu' || 'cu128' }}
-        run: |
-          uv venv
-          uv pip install ninja numpy setuptools setuptools-scm torch
-
       - name: Build wheel
         env:
           TORCH_CUDA_ARCH_LIST: "7.0;7.5;8.0;8.6;9.0;10.0;12.0+PTX"
-        run: uv build --wheel --no-build-isolation
+        run: uv build --wheel
 
       - name: Relabel the Linux wheel
         if: runner.os == 'Linux'

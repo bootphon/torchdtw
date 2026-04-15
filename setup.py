@@ -32,7 +32,7 @@ class CUDAArchListError(RuntimeError):
 
 def get_extension() -> Extension:
     """Either CUDA or CPU extension."""
-    use_cuda = CUDA_HOME is not None
+    use_cuda = CUDA_HOME is not None and sys.platform != "win32"
     if use_cuda and "TORCH_CUDA_ARCH_LIST" not in os.environ:
         raise CUDAArchListError
     sources = ["src/torchdtw/csrc/dtw.cpp"] + (["src/torchdtw/csrc/cuda/dtw.cu"] if use_cuda else [])
