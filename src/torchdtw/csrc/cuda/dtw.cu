@@ -1,5 +1,6 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <limits>
 #include <optional>
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/library.h>
@@ -16,16 +17,24 @@
 namespace torchdtw {
 
 using torch::stable::Tensor;
-template <typename T, size_t N>
-using PackedTensorAccessor32 =
-    torch::headeronly::HeaderOnlyGenericPackedTensorAccessor<T, N, torch::headeronly::RestrictPtrTraits, int32_t>;
+
+template <typename T, size_t N, typename index_t>
+using PackedTensorAccessor =
+    torch::headeronly::HeaderOnlyGenericPackedTensorAccessor<T, N, torch::headeronly::RestrictPtrTraits, index_t>;
+template <typename T, size_t N> using PackedTensorAccessor32 = PackedTensorAccessor<T, N, int32_t>;
+template <typename T, size_t N> using PackedTensorAccessor64 = PackedTensorAccessor<T, N, int64_t>;
 template <typename T, size_t N> inline PackedTensorAccessor32<T, N> packed_accessor32(torch::stable::Tensor t) {
   return PackedTensorAccessor32<T, N>(static_cast<typename PackedTensorAccessor32<T, N>::PtrType>(t.data_ptr()),
                                       t.sizes().data(), t.strides().data());
 }
+template <typename T, size_t N> inline PackedTensorAccessor64<T, N> packed_accessor64(torch::stable::Tensor t) {
+  return PackedTensorAccessor64<T, N>(static_cast<typename PackedTensorAccessor64<T, N>::PtrType>(t.data_ptr()),
+                                      t.sizes().data(), t.strides().data());
+}
 
-__global__ void dtw_wavefront_kernel(PackedTensorAccessor32<float, 4> cost,
-                                     const PackedTensorAccessor32<float, 4> distances,
+template <typename index_t>
+__global__ void dtw_wavefront_kernel(PackedTensorAccessor<float, 4, index_t> cost,
+                                     const PackedTensorAccessor<float, 4, index_t> distances,
                                      const PackedTensorAccessor32<int64_t, 1> sx,
                                      const PackedTensorAccessor32<int64_t, 1> sy, bool symmetric) {
   const int x = blockIdx.x;
@@ -67,7 +76,9 @@ __global__ void dtw_wavefront_kernel(PackedTensorAccessor32<float, 4> cost,
   }
 }
 
-__global__ void dtw_backtrack_kernel(PackedTensorAccessor32<float, 2> out, const PackedTensorAccessor32<float, 4> cost,
+template <typename index_t>
+__global__ void dtw_backtrack_kernel(PackedTensorAccessor32<float, 2> out,
+                                     const PackedTensorAccessor<float, 4, index_t> cost,
                                      const PackedTensorAccessor32<int64_t, 1> sx,
                                      const PackedTensorAccessor32<int64_t, 1> sy, bool symmetric) {
   const int x = blockIdx.x;
@@ -123,12 +134,22 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
   torch::stable::accelerator::DeviceIndex device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
   cudaStream_t stream = (cudaStream_t)torch::stable::accelerator::getCurrentStream(device_idx).id();
 
-  dtw_wavefront_kernel<<<num_blocks, num_threads, 0, stream>>>(
-      packed_accessor32<float, 4>(cost), packed_accessor32<float, 4>(distances), packed_accessor32<int64_t, 1>(sx),
-      packed_accessor32<int64_t, 1>(sy), symmetric);
-  dtw_backtrack_kernel<<<num_blocks, 1, 0, stream>>>(
-      packed_accessor32<float, 2>(out), packed_accessor32<float, 4>(cost), packed_accessor32<int64_t, 1>(sx),
-      packed_accessor32<int64_t, 1>(sy), symmetric);
+  const bool needs_64bit = nx * ny * max_x * max_y > std::numeric_limits<int32_t>::max();
+  if (needs_64bit) {
+    dtw_wavefront_kernel<int64_t><<<num_blocks, num_threads, 0, stream>>>(
+        packed_accessor64<float, 4>(cost), packed_accessor64<float, 4>(distances), packed_accessor32<int64_t, 1>(sx),
+        packed_accessor32<int64_t, 1>(sy), symmetric);
+    dtw_backtrack_kernel<int64_t>
+        <<<num_blocks, 1, 0, stream>>>(packed_accessor32<float, 2>(out), packed_accessor64<float, 4>(cost),
+                                       packed_accessor32<int64_t, 1>(sx), packed_accessor32<int64_t, 1>(sy), symmetric);
+  } else {
+    dtw_wavefront_kernel<int32_t><<<num_blocks, num_threads, 0, stream>>>(
+        packed_accessor32<float, 4>(cost), packed_accessor32<float, 4>(distances), packed_accessor32<int64_t, 1>(sx),
+        packed_accessor32<int64_t, 1>(sy), symmetric);
+    dtw_backtrack_kernel<int32_t>
+        <<<num_blocks, 1, 0, stream>>>(packed_accessor32<float, 2>(out), packed_accessor32<float, 4>(cost),
+                                       packed_accessor32<int64_t, 1>(sx), packed_accessor32<int64_t, 1>(sy), symmetric);
+  }
   return out;
 }
 
