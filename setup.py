@@ -35,17 +35,22 @@ def get_extension() -> Extension:
     use_cuda = CUDA_HOME is not None
     if use_cuda and "TORCH_CUDA_ARCH_LIST" not in os.environ:
         raise CUDAArchListError
-    extension = CUDAExtension if use_cuda else CppExtension
     sources = ["src/torchdtw/csrc/dtw.cpp"] + (["src/torchdtw/csrc/cuda/dtw.cu"] if use_cuda else [])
     compiler_flags, linker_flags = get_flags()
     extra_compile_args = {"cxx": ["-DTORCH_TARGET_VERSION=0x020A000000000000", *compiler_flags], "nvcc": ["-O3"]}
-    return extension(
+    extension = (CUDAExtension if use_cuda else CppExtension)(
         "torchdtw._C",
         sources,
         extra_compile_args=extra_compile_args,
         extra_link_args=linker_flags,
         py_limited_api=True,
     )
+    if use_cuda:
+        # Remove cudart so it does not appear in the .so's dependencies.
+        # Cudart symbols are resolved at runtime from the cudart already loaded by PyTorch,
+        # making the wheel compatible across CUDA major versions.
+        extension.libraries = [lib for lib in extension.libraries if "cudart" not in lib]
+    return extension
 
 
 if __name__ == "__main__":
