@@ -108,8 +108,10 @@ Tensor dtw_path_cpu(const Tensor& distances) {
   const Tensor cost = compute_dtw_cost(distances);
   const auto path = compute_dtw_path(cost);
   Tensor out = torch::stable::new_empty(distances, {(int64_t)path.size(), 2}, torch::headeronly::ScalarType::Long);
-  std::memcpy(reinterpret_cast<int64_t*>(out.data_ptr()), reinterpret_cast<const int64_t*>(path.data()),
-              static_cast<size_t>(path.size() * 2) * sizeof(int64_t));
+  std::memcpy(
+      reinterpret_cast<int64_t*>(out.data_ptr()),
+      reinterpret_cast<const int64_t*>(path.data()),
+      static_cast<size_t>(path.size() * 2) * sizeof(int64_t));
   return out;
 }
 
