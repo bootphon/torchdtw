@@ -33,6 +33,9 @@ template <typename T, size_t N> inline PackedTensorAccessor64<T, N> packed_acces
 }
 
 // Trace directions: 0 = diag (i-1, j-1), 1 = left (i, j-1), 2 = up (i-1, j).
+// The trace tensor is laid out by anti-diagonal: trace[x][y][d][k] holds the direction
+// for cell (start_i - k, start_j + k) on diagonal d. This makes wavefront writes coalesced
+// since consecutive threads on a diagonal map to consecutive k.
 template <typename scalar_t, typename sx_t, typename index_t>
 __global__ void dtw_wavefront_kernel(
     PackedTensorAccessor32<scalar_t, 2> out, PackedTensorAccessor<int8_t, 4, index_t> trace,
@@ -95,7 +98,7 @@ __global__ void dtw_wavefront_kernel(
         min_cost = c_up;
       }
       const scalar_t cij = distances_xy[i][j] + min_cost;
-      trace_xy[i][j] = direction;
+      trace_xy[diag][k] = direction;
       buffers[gamma][j] = cij;
       if (i == N - 1 && j == M - 1)
         out[x][y] = cij;
@@ -127,11 +130,13 @@ __global__ void dtw_backtrack_kernel(
   int32_t i = N - 1;
   int32_t j = M - 1;
   while (i > 0 && j > 0) {
-    const int8_t d = trace_xy[i][j];
-    if (d == 0) {
+    const int32_t diag = i + j;
+    const int32_t k = j - max(0, diag - (N - 1));
+    const int8_t dir = trace_xy[diag][k];
+    if (dir == 0) {
       i--;
       j--;
-    } else if (d == 1) {
+    } else if (dir == 1) {
       j--;
     } else {
       i--;
@@ -193,15 +198,18 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
 
   STD_TORCH_CHECK(nx > 0 && ny > 0 && max_x > 0 && max_y > 0, "Empty input tensor");
 
+  const int64_t num_diags = max_x + max_y - 1;
+  const int64_t max_diag = max_x < max_y ? max_x : max_y;
   Tensor trace = torch::stable::new_empty(
-      distances, {nx, ny, max_x, max_y}, std::make_optional(torch::headeronly::ScalarType::Char));
+      distances, {nx, ny, num_diags, max_diag}, std::make_optional(torch::headeronly::ScalarType::Char));
   Tensor out = torch::stable::new_zeros(distances, {nx, ny});
 
   const dim3 num_blocks(nx, ny);
   const int num_threads = max_x > 1024 ? 1024 : max_x;
   torch::stable::accelerator::DeviceIndex device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
   cudaStream_t stream = (cudaStream_t)torch::stable::accelerator::getCurrentStream(device_idx).id();
-  const bool needs_64bit = nx * ny * max_x * max_y > std::numeric_limits<int32_t>::max();
+  const int64_t max_elems = nx * ny * (max_x * max_y < num_diags * max_diag ? num_diags * max_diag : max_x * max_y);
+  const bool needs_64bit = max_elems > std::numeric_limits<int32_t>::max();
 
   THO_DISPATCH_V2(
       distances.scalar_type(),
