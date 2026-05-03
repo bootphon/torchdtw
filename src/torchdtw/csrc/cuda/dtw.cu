@@ -192,7 +192,7 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
       AT_WRAP([&] {
         using distances_t = scalar_t;
         constexpr int64_t max_diag_len = SHARED_MEM_SIZE / (3 * sizeof(distances_t));
-        STD_TORCH_CHECK(max_x < max_diag_len, "Diagonal too large to use CUDA shared memory");
+        STD_TORCH_CHECK(max_y <= max_diag_len, "Diagonal too large to use CUDA shared memory");
         THO_DISPATCH_V2(
             sx.scalar_type(),
             "dtw_batch_cuda_impl_2",
