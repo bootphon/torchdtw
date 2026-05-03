@@ -176,7 +176,7 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
   Tensor out = torch::stable::new_zeros(distances, {nx, ny});
 
   const dim3 num_blocks(nx, ny);
-  const int num_threads = max_x > 1024 ? 1024 : max_x;
+  const int num_threads = max_diag > 1024 ? 1024 : static_cast<int>(max_diag);
   torch::stable::accelerator::DeviceIndex device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
   cudaStream_t stream = (cudaStream_t)torch::stable::accelerator::getCurrentStream(device_idx).id();
   const int64_t max_elems = nx * ny * (max_x * max_y < num_diags * max_diag ? num_diags * max_diag : max_x * max_y);
