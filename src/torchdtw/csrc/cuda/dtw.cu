@@ -32,13 +32,15 @@ template <typename T, size_t N> inline PackedTensorAccessor64<T, N> packed_acces
       static_cast<typename PackedTensorAccessor64<T, N>::PtrType>(t.data_ptr()), t.sizes().data(), t.strides().data());
 }
 
+// Trace directions: 0 = diag (i-1, j-1), 1 = left (i, j-1), 2 = up (i-1, j).
 template <typename scalar_t, typename sx_t, typename index_t>
 __global__ void dtw_wavefront_kernel(
-    PackedTensorAccessor<scalar_t, 4, index_t> cost, const PackedTensorAccessor<scalar_t, 4, index_t> distances,
-    const PackedTensorAccessor32<sx_t, 1> sx, const PackedTensorAccessor32<sx_t, 1> sy, bool symmetric) {
+    PackedTensorAccessor32<scalar_t, 2> out, PackedTensorAccessor<int8_t, 4, index_t> trace,
+    const PackedTensorAccessor<scalar_t, 4, index_t> distances, const PackedTensorAccessor32<sx_t, 1> sx,
+    const PackedTensorAccessor32<sx_t, 1> sy, bool symmetric) {
   const int32_t x = blockIdx.x;
   const int32_t y = blockIdx.y;
-  if (x >= cost.size(0) || y >= cost.size(1))
+  if (x >= trace.size(0) || y >= trace.size(1))
     return;
   if (symmetric && x >= y)
     return;
@@ -51,13 +53,14 @@ __global__ void dtw_wavefront_kernel(
   int32_t beta = 1;  // Second to last diagonal
   int32_t gamma = 2; // Buffer for the last diagonal
 
-  auto cost_xy = cost[x][y];
+  auto trace_xy = trace[x][y];
   const auto distances_xy = distances[x][y];
 
   if (threadIdx.x == 0) {
     const scalar_t c00 = distances_xy[0][0];
-    cost_xy[0][0] = c00;
     buffers[gamma][0] = c00;
+    if (N == 1 && M == 1)
+      out[x][y] = c00;
   }
   __syncthreads();
   {
@@ -79,11 +82,23 @@ __global__ void dtw_wavefront_kernel(
       const scalar_t c_up = (i > 0) ? buffers[alpha][j] : max_val;
       const scalar_t c_left = (j > 0) ? buffers[alpha][j - 1] : max_val;
       const scalar_t c_diag = (i > 0 && j > 0) ? buffers[beta][j - 1] : max_val;
-      scalar_t min_cost = c_left < c_up ? c_left : c_up;
-      min_cost = c_diag < min_cost ? c_diag : min_cost;
+      int8_t direction;
+      scalar_t min_cost;
+      if (c_diag <= c_left && c_diag <= c_up) {
+        direction = 0;
+        min_cost = c_diag;
+      } else if (c_left <= c_up) {
+        direction = 1;
+        min_cost = c_left;
+      } else {
+        direction = 2;
+        min_cost = c_up;
+      }
       const scalar_t cij = distances_xy[i][j] + min_cost;
-      cost_xy[i][j] = cij;
+      trace_xy[i][j] = direction;
       buffers[gamma][j] = cij;
+      if (i == N - 1 && j == M - 1)
+        out[x][y] = cij;
     }
     __syncthreads();
 
@@ -96,28 +111,27 @@ __global__ void dtw_wavefront_kernel(
 
 template <typename scalar_t, typename sx_t, typename index_t>
 __global__ void dtw_backtrack_kernel(
-    PackedTensorAccessor32<scalar_t, 2> out, const PackedTensorAccessor<scalar_t, 4, index_t> cost,
+    PackedTensorAccessor32<scalar_t, 2> out, const PackedTensorAccessor<int8_t, 4, index_t> trace,
     const PackedTensorAccessor32<sx_t, 1> sx, const PackedTensorAccessor32<sx_t, 1> sy, bool symmetric) {
-  const int x = blockIdx.x;
-  const int y = blockIdx.y;
-  if (x >= cost.size(0) || y >= cost.size(1))
+  const int32_t x = blockIdx.x;
+  const int32_t y = blockIdx.y;
+  if (x >= trace.size(0) || y >= trace.size(1))
     return;
   if (symmetric && x >= y)
     return;
-  const int64_t N = sx[x];
-  const int64_t M = sy[y];
+  const int32_t N = static_cast<int32_t>(sx[x]);
+  const int32_t M = static_cast<int32_t>(sy[y]);
 
-  int64_t path_len = 1;
-  int64_t i = N - 1;
-  int64_t j = M - 1;
+  const auto trace_xy = trace[x][y];
+  int32_t path_len = 1;
+  int32_t i = N - 1;
+  int32_t j = M - 1;
   while (i > 0 && j > 0) {
-    const scalar_t c_up = cost[x][y][i - 1][j];
-    const scalar_t c_left = cost[x][y][i][j - 1];
-    const scalar_t c_diag = cost[x][y][i - 1][j - 1];
-    if (c_diag <= c_left && c_diag <= c_up) {
+    const int8_t d = trace_xy[i][j];
+    if (d == 0) {
       i--;
       j--;
-    } else if (c_left <= c_up) {
+    } else if (d == 1) {
       j--;
     } else {
       i--;
@@ -129,40 +143,42 @@ __global__ void dtw_backtrack_kernel(
   if (j == 0)
     path_len += i;
 
-  out[x][y] = cost[x][y][N - 1][M - 1] / path_len;
+  out[x][y] = out[x][y] / static_cast<scalar_t>(path_len);
   if (symmetric)
     out[y][x] = out[x][y];
 }
 
 template <typename distances_t, typename sx_t>
 void dtw_batch_cuda_impl(
-    Tensor& out, Tensor& cost, const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric,
+    Tensor& out, Tensor& trace, const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric,
     dim3 num_blocks, int num_threads, cudaStream_t stream, bool needs_64bit) {
   STD_TORCH_CHECK(
       sy.scalar_type() == torch::headeronly::CppTypeToScalarType<sx_t>::value, "sy dtype does not match sx dtype");
   if (needs_64bit) {
     dtw_wavefront_kernel<distances_t, sx_t, int64_t><<<num_blocks, num_threads, 0, stream>>>(
-        packed_accessor64<distances_t, 4>(cost),
+        packed_accessor32<distances_t, 2>(out),
+        packed_accessor64<int8_t, 4>(trace),
         packed_accessor64<distances_t, 4>(distances),
         packed_accessor32<sx_t, 1>(sx),
         packed_accessor32<sx_t, 1>(sy),
         symmetric);
     dtw_backtrack_kernel<distances_t, sx_t, int64_t><<<num_blocks, 1, 0, stream>>>(
         packed_accessor32<distances_t, 2>(out),
-        packed_accessor64<distances_t, 4>(cost),
+        packed_accessor64<int8_t, 4>(trace),
         packed_accessor32<sx_t, 1>(sx),
         packed_accessor32<sx_t, 1>(sy),
         symmetric);
   } else {
     dtw_wavefront_kernel<distances_t, sx_t, int32_t><<<num_blocks, num_threads, 0, stream>>>(
-        packed_accessor32<distances_t, 4>(cost),
+        packed_accessor32<distances_t, 2>(out),
+        packed_accessor32<int8_t, 4>(trace),
         packed_accessor32<distances_t, 4>(distances),
         packed_accessor32<sx_t, 1>(sx),
         packed_accessor32<sx_t, 1>(sy),
         symmetric);
     dtw_backtrack_kernel<distances_t, sx_t, int32_t><<<num_blocks, 1, 0, stream>>>(
         packed_accessor32<distances_t, 2>(out),
-        packed_accessor32<distances_t, 4>(cost),
+        packed_accessor32<int8_t, 4>(trace),
         packed_accessor32<sx_t, 1>(sx),
         packed_accessor32<sx_t, 1>(sy),
         symmetric);
@@ -177,7 +193,8 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
 
   STD_TORCH_CHECK(nx > 0 && ny > 0 && max_x > 0 && max_y > 0, "Empty input tensor");
 
-  Tensor cost = torch::stable::new_empty(distances, {nx, ny, max_x, max_y});
+  Tensor trace = torch::stable::new_empty(
+      distances, {nx, ny, max_x, max_y}, std::make_optional(torch::headeronly::ScalarType::Char));
   Tensor out = torch::stable::new_zeros(distances, {nx, ny});
 
   const dim3 num_blocks(nx, ny);
@@ -199,7 +216,7 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
             AT_WRAP([&] {
               using sx_t = scalar_t;
               (dtw_batch_cuda_impl<distances_t, sx_t>(
-                  out, cost, distances, sx, sy, symmetric, num_blocks, num_threads, stream, needs_64bit));
+                  out, trace, distances, sx, sy, symmetric, num_blocks, num_threads, stream, needs_64bit));
             }),
             AT_INTEGRAL_TYPES_V2);
       }),
