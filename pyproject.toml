@@ -66,6 +66,9 @@ ignore-names = ["_check"]
 [tool.ruff.lint.pep8-naming]
 ignore-names = ["F"]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["S101"]
+
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"
 
