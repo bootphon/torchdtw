@@ -37,7 +37,7 @@ template <typename T, size_t N> inline PackedTensorAccessor64<T, N> packed_acces
 // for cell (start_i - k, start_j + k) on diagonal d. This makes wavefront writes coalesced
 // since consecutive threads on a diagonal map to consecutive k.
 template <typename scalar_t, typename sx_t, typename index_t>
-__global__ void dtw_wavefront_kernel(
+__global__ void dtw_kernel(
     PackedTensorAccessor32<scalar_t, 2> out, PackedTensorAccessor<int8_t, 4, index_t> trace,
     const PackedTensorAccessor<scalar_t, 4, index_t> distances, const PackedTensorAccessor32<sx_t, 1> sx,
     const PackedTensorAccessor32<sx_t, 1> sy, bool symmetric) {
@@ -59,12 +59,8 @@ __global__ void dtw_wavefront_kernel(
   auto trace_xy = trace[x][y];
   const auto distances_xy = distances[x][y];
 
-  if (threadIdx.x == 0) {
-    const scalar_t c00 = distances_xy[0][0];
-    buffers[gamma][0] = c00;
-    if (N == 1 && M == 1)
-      out[x][y] = c00;
-  }
+  if (threadIdx.x == 0)
+    buffers[gamma][0] = distances_xy[0][0];
   __syncthreads();
   {
     const int32_t temp = beta;
@@ -100,8 +96,6 @@ __global__ void dtw_wavefront_kernel(
       const scalar_t cij = distances_xy[i][j] + min_cost;
       trace_xy[diag][k] = direction;
       buffers[gamma][j] = cij;
-      if (i == N - 1 && j == M - 1)
-        out[x][y] = cij;
     }
     __syncthreads();
 
@@ -110,47 +104,36 @@ __global__ void dtw_wavefront_kernel(
     alpha = gamma;
     gamma = temp;
   }
-}
 
-template <typename scalar_t, typename sx_t, typename index_t>
-__global__ void dtw_backtrack_kernel(
-    PackedTensorAccessor32<scalar_t, 2> out, const PackedTensorAccessor<int8_t, 4, index_t> trace,
-    const PackedTensorAccessor32<sx_t, 1> sx, const PackedTensorAccessor32<sx_t, 1> sy, bool symmetric) {
-  const int32_t x = blockIdx.x;
-  const int32_t y = blockIdx.y;
-  if (x >= trace.size(0) || y >= trace.size(1))
-    return;
-  if (symmetric && x >= y)
-    return;
-  const int32_t N = static_cast<int32_t>(sx[x]);
-  const int32_t M = static_cast<int32_t>(sy[y]);
-
-  const auto trace_xy = trace[x][y];
-  int32_t path_len = 1;
-  int32_t i = N - 1;
-  int32_t j = M - 1;
-  while (i > 0 && j > 0) {
-    const int32_t diag = i + j;
-    const int32_t k = j - max(0, diag - (N - 1));
-    const int8_t dir = trace_xy[diag][k];
-    if (dir == 0) {
-      i--;
-      j--;
-    } else if (dir == 1) {
-      j--;
-    } else {
-      i--;
+  if (threadIdx.x == 0) {
+    const scalar_t final_cost = buffers[alpha][M - 1];
+    int32_t path_len = 1;
+    int32_t i = N - 1;
+    int32_t j = M - 1;
+    while (i > 0 && j > 0) {
+      const int32_t d = i + j;
+      const int32_t kk = j - max(0, d - (N - 1));
+      const int8_t dir = trace_xy[d][kk];
+      if (dir == 0) {
+        i--;
+        j--;
+      } else if (dir == 1) {
+        j--;
+      } else {
+        i--;
+      }
+      path_len++;
     }
-    path_len++;
-  }
-  if (i == 0)
-    path_len += j;
-  if (j == 0)
-    path_len += i;
+    if (i == 0)
+      path_len += j;
+    if (j == 0)
+      path_len += i;
 
-  out[x][y] = out[x][y] / static_cast<scalar_t>(path_len);
-  if (symmetric)
-    out[y][x] = out[x][y];
+    const scalar_t result = final_cost / static_cast<scalar_t>(path_len);
+    out[x][y] = result;
+    if (symmetric)
+      out[y][x] = result;
+  }
 }
 
 template <typename distances_t, typename sx_t>
@@ -160,30 +143,18 @@ void dtw_batch_cuda_impl(
   STD_TORCH_CHECK(
       sy.scalar_type() == torch::headeronly::CppTypeToScalarType<sx_t>::value, "sy dtype does not match sx dtype");
   if (needs_64bit) {
-    dtw_wavefront_kernel<distances_t, sx_t, int64_t><<<num_blocks, num_threads, 0, stream>>>(
+    dtw_kernel<distances_t, sx_t, int64_t><<<num_blocks, num_threads, 0, stream>>>(
         packed_accessor32<distances_t, 2>(out),
         packed_accessor64<int8_t, 4>(trace),
         packed_accessor64<distances_t, 4>(distances),
         packed_accessor32<sx_t, 1>(sx),
         packed_accessor32<sx_t, 1>(sy),
         symmetric);
-    dtw_backtrack_kernel<distances_t, sx_t, int64_t><<<num_blocks, 1, 0, stream>>>(
-        packed_accessor32<distances_t, 2>(out),
-        packed_accessor64<int8_t, 4>(trace),
-        packed_accessor32<sx_t, 1>(sx),
-        packed_accessor32<sx_t, 1>(sy),
-        symmetric);
   } else {
-    dtw_wavefront_kernel<distances_t, sx_t, int32_t><<<num_blocks, num_threads, 0, stream>>>(
+    dtw_kernel<distances_t, sx_t, int32_t><<<num_blocks, num_threads, 0, stream>>>(
         packed_accessor32<distances_t, 2>(out),
         packed_accessor32<int8_t, 4>(trace),
         packed_accessor32<distances_t, 4>(distances),
-        packed_accessor32<sx_t, 1>(sx),
-        packed_accessor32<sx_t, 1>(sy),
-        symmetric);
-    dtw_backtrack_kernel<distances_t, sx_t, int32_t><<<num_blocks, 1, 0, stream>>>(
-        packed_accessor32<distances_t, 2>(out),
-        packed_accessor32<int8_t, 4>(trace),
         packed_accessor32<sx_t, 1>(sx),
         packed_accessor32<sx_t, 1>(sy),
         symmetric);
