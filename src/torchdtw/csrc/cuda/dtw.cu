@@ -36,47 +36,58 @@ template <typename scalar_t, typename sx_t, typename index_t>
 __global__ void dtw_wavefront_kernel(
     PackedTensorAccessor<scalar_t, 4, index_t> cost, const PackedTensorAccessor<scalar_t, 4, index_t> distances,
     const PackedTensorAccessor32<sx_t, 1> sx, const PackedTensorAccessor32<sx_t, 1> sy, bool symmetric) {
-  const int x = blockIdx.x;
-  const int y = blockIdx.y;
+  const int32_t x = blockIdx.x;
+  const int32_t y = blockIdx.y;
   if (x >= cost.size(0) || y >= cost.size(1))
     return;
   if (symmetric && x >= y)
     return;
-  const int64_t N = sx[x];
-  const int64_t M = sy[y];
+  const int32_t N = static_cast<int32_t>(sx[x]);
+  const int32_t M = static_cast<int32_t>(sy[y]);
 
-  constexpr int max_diag_len = SHARED_MEM_SIZE / (3 * sizeof(scalar_t));
+  constexpr int32_t max_diag_len = SHARED_MEM_SIZE / (3 * sizeof(scalar_t));
   __shared__ scalar_t buffers[3][max_diag_len];
-  int alpha = 0; // Last diagonal
-  int beta = 1;  // Second to last diagonal
-  int gamma = 2; // Buffer for the last diagonal
+  int32_t alpha = 0; // Last diagonal
+  int32_t beta = 1;  // Second to last diagonal
+  int32_t gamma = 2; // Buffer for the last diagonal
+
+  auto cost_xy = cost[x][y];
+  const auto distances_xy = distances[x][y];
+
+  if (threadIdx.x == 0) {
+    const scalar_t c00 = distances_xy[0][0];
+    cost_xy[0][0] = c00;
+    buffers[gamma][0] = c00;
+  }
+  __syncthreads();
+  {
+    const int32_t temp = beta;
+    beta = alpha;
+    alpha = gamma;
+    gamma = temp;
+  }
 
   const scalar_t max_val = std::numeric_limits<scalar_t>::max();
-  for (int64_t diag = 0; diag <= N + M - 1; diag++) {
-    const int64_t start_i = min(diag, N - 1);
-    const int64_t start_j = max(int64_t(0), diag - start_i);
-    const int64_t length = start_i - max(int64_t(0), diag - M + 1) + 1;
+  for (int32_t diag = 1; diag <= N + M - 2; diag++) {
+    const int32_t start_i = min(diag, N - 1);
+    const int32_t start_j = max(0, diag - start_i);
+    const int32_t length = start_i - max(0, diag - M + 1) + 1;
 
-    for (int k = threadIdx.x; k < length; k += blockDim.x) {
-      const int64_t i = start_i - k;
-      const int64_t j = start_j + k;
+    for (int32_t k = threadIdx.x; k < length; k += blockDim.x) {
+      const int32_t i = start_i - k;
+      const int32_t j = start_j + k;
       const scalar_t c_up = (i > 0) ? buffers[alpha][j] : max_val;
       const scalar_t c_left = (j > 0) ? buffers[alpha][j - 1] : max_val;
       const scalar_t c_diag = (i > 0 && j > 0) ? buffers[beta][j - 1] : max_val;
-      scalar_t min_cost;
-      if (i == 0 && j == 0) {
-        min_cost = scalar_t(0);
-      } else {
-        min_cost = c_left < c_up ? c_left : c_up;
-        min_cost = c_diag < min_cost ? c_diag : min_cost;
-      }
-      const scalar_t cij = distances[x][y][i][j] + min_cost;
-      cost[x][y][i][j] = cij;
+      scalar_t min_cost = c_left < c_up ? c_left : c_up;
+      min_cost = c_diag < min_cost ? c_diag : min_cost;
+      const scalar_t cij = distances_xy[i][j] + min_cost;
+      cost_xy[i][j] = cij;
       buffers[gamma][j] = cij;
     }
     __syncthreads();
 
-    int temp = beta;
+    const int32_t temp = beta;
     beta = alpha;
     alpha = gamma;
     gamma = temp;
@@ -166,7 +177,7 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
 
   STD_TORCH_CHECK(nx > 0 && ny > 0 && max_x > 0 && max_y > 0, "Empty input tensor");
 
-  Tensor cost = torch::stable::new_zeros(distances, {nx, ny, max_x, max_y});
+  Tensor cost = torch::stable::new_empty(distances, {nx, ny, max_x, max_y});
   Tensor out = torch::stable::new_zeros(distances, {nx, ny});
 
   const dim3 num_blocks(nx, ny);
