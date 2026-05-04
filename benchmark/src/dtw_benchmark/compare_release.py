@@ -8,8 +8,8 @@ Two roles:
 - `measure`: internal entrypoint used by the driver inside the child process.
 
 Usage:
-    python benchmark/compare_release.py
-    python benchmark/compare_release.py --min-run-time 0.5 --seed 1
+    uv run -m dtw_benchmark.compare_release
+    uv run -m dtw_benchmark.compare_release --min-run-time 0.5 --seed 1
 """
 
 import argparse
