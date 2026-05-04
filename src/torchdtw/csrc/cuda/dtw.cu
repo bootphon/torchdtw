@@ -41,11 +41,16 @@ __global__ void dtw_kernel(
     PackedTensorAccessor32<scalar_t, 2> out, PackedTensorAccessor<int8_t, 4, index_t> trace,
     const PackedTensorAccessor<scalar_t, 4, index_t> distances, const PackedTensorAccessor32<sx_t, 1> sx,
     const PackedTensorAccessor32<sx_t, 1> sy, bool symmetric) {
-  const int32_t x = blockIdx.x;
-  const int32_t y = blockIdx.y;
+  int32_t x, y;
+  if (symmetric) {
+    const int32_t b = static_cast<int32_t>(blockIdx.x);
+    y = static_cast<int32_t>((1.0 + sqrt(1.0 + 8.0 * static_cast<double>(b))) / 2.0);
+    x = b - y * (y - 1) / 2;
+  } else {
+    x = blockIdx.x;
+    y = blockIdx.y;
+  }
   if (x >= trace.size(0) || y >= trace.size(1))
-    return;
-  if (symmetric && x >= y)
     return;
   const int32_t N = static_cast<int32_t>(sx[x]);
   const int32_t M = static_cast<int32_t>(sy[y]);
@@ -175,7 +180,9 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
       distances, {nx, ny, num_diags, max_diag}, std::make_optional(torch::headeronly::ScalarType::Char));
   Tensor out = torch::stable::new_zeros(distances, {nx, ny});
 
-  const dim3 num_blocks(nx, ny);
+  if (symmetric && nx <= 1)
+    return out;
+  const dim3 num_blocks = symmetric ? dim3(static_cast<unsigned int>(nx * (nx - 1) / 2)) : dim3(nx, ny);
   const int num_threads = max_diag > 1024 ? 1024 : static_cast<int>(max_diag);
   torch::stable::accelerator::DeviceIndex device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
   cudaStream_t stream = (cudaStream_t)torch::stable::accelerator::getCurrentStream(device_idx).id();
