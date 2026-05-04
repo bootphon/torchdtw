@@ -11,8 +11,9 @@
 #include <torch/headeronly/core/TensorAccessor.h>
 #include <torch/headeronly/util/Exception.h>
 
-// Shared memory has a size of 48kB, shared by 3 diagonal buffers.
-#define SHARED_MEM_SIZE 49152
+// Shared memory has a size of 48KiB, shared by 3 cost diagonal buffers and 3 path-length diagonal buffers.
+// MAX_DIAG_LEN = 49152 / (3 * (sizeof(double) + sizeof(uint16_t))) = 49152 / (3 * (8 + 2))
+#define MAX_DIAG_LEN 1638
 
 namespace torchdtw {
 
@@ -32,15 +33,13 @@ template <typename T, size_t N> inline PackedTensorAccessor64<T, N> packed_acces
       static_cast<typename PackedTensorAccessor64<T, N>::PtrType>(t.data_ptr()), t.sizes().data(), t.strides().data());
 }
 
-// Trace directions: 0 = diag (i-1, j-1), 1 = left (i, j-1), 2 = up (i-1, j).
-// The trace tensor is laid out by anti-diagonal: trace[x][y][d][k] holds the direction
-// for cell (start_i - k, start_j + k) on diagonal d. This makes wavefront writes coalesced
-// since consecutive threads on a diagonal map to consecutive k.
+// Wavefront DP over anti-diagonals. Each cell tracks its cost and the length of the optimal path
+// reaching it (one more than its chosen parent's path length). The cost of (N-1, M-1) divided by
+// its path length is the final result, so no traceback is needed.
 template <typename scalar_t, typename sx_t, typename index_t>
 __global__ void dtw_kernel(
-    PackedTensorAccessor32<scalar_t, 2> out, PackedTensorAccessor<int8_t, 4, index_t> trace,
-    const PackedTensorAccessor<scalar_t, 4, index_t> distances, const PackedTensorAccessor32<sx_t, 1> sx,
-    const PackedTensorAccessor32<sx_t, 1> sy, bool symmetric) {
+    PackedTensorAccessor32<scalar_t, 2> out, const PackedTensorAccessor<scalar_t, 4, index_t> distances,
+    const PackedTensorAccessor32<sx_t, 1> sx, const PackedTensorAccessor32<sx_t, 1> sy, bool symmetric) {
   int32_t x, y;
   if (symmetric) {
     const int32_t b = static_cast<int32_t>(blockIdx.x);
@@ -50,29 +49,28 @@ __global__ void dtw_kernel(
     x = blockIdx.x;
     y = blockIdx.y;
   }
-  if (x >= trace.size(0) || y >= trace.size(1))
+  if (x >= out.size(0) || y >= out.size(1))
     return;
   const int32_t N = static_cast<int32_t>(sx[x]);
   const int32_t M = static_cast<int32_t>(sy[y]);
 
-  constexpr int32_t max_diag_len = SHARED_MEM_SIZE / (3 * sizeof(scalar_t));
-  __shared__ scalar_t buffers[3][max_diag_len];
+  __shared__ scalar_t cost_buf[3][MAX_DIAG_LEN];
+  __shared__ uint16_t len_buf[3][MAX_DIAG_LEN];
   int32_t alpha = 0; // Last diagonal
   int32_t beta = 1;  // Second to last diagonal
   int32_t gamma = 2; // Buffer for the last diagonal
 
-  auto trace_xy = trace[x][y];
   const auto distances_xy = distances[x][y];
 
-  if (threadIdx.x == 0)
-    buffers[gamma][0] = distances_xy[0][0];
-  __syncthreads();
-  {
-    const int32_t temp = beta;
-    beta = alpha;
-    alpha = gamma;
-    gamma = temp;
+  if (threadIdx.x == 0) {
+    cost_buf[gamma][0] = distances_xy[0][0];
+    len_buf[gamma][0] = 1;
   }
+  __syncthreads();
+  const int32_t temp = beta;
+  beta = alpha;
+  alpha = gamma;
+  gamma = temp;
 
   const scalar_t max_val = std::numeric_limits<scalar_t>::max();
   for (int32_t diag = 1; diag <= N + M - 2; diag++) {
@@ -83,24 +81,23 @@ __global__ void dtw_kernel(
     for (int32_t k = threadIdx.x; k < length; k += blockDim.x) {
       const int32_t i = start_i - k;
       const int32_t j = start_j + k;
-      const scalar_t c_up = (i > 0) ? buffers[alpha][j] : max_val;
-      const scalar_t c_left = (j > 0) ? buffers[alpha][j - 1] : max_val;
-      const scalar_t c_diag = (i > 0 && j > 0) ? buffers[beta][j - 1] : max_val;
-      int8_t direction;
+      const scalar_t c_up = (i > 0) ? cost_buf[alpha][j] : max_val;
+      const scalar_t c_left = (j > 0) ? cost_buf[alpha][j - 1] : max_val;
+      const scalar_t c_diag = (i > 0 && j > 0) ? cost_buf[beta][j - 1] : max_val;
       scalar_t min_cost;
+      uint16_t parent_len;
       if (c_diag <= c_left && c_diag <= c_up) {
-        direction = 0;
         min_cost = c_diag;
+        parent_len = len_buf[beta][j - 1];
       } else if (c_left <= c_up) {
-        direction = 1;
         min_cost = c_left;
+        parent_len = len_buf[alpha][j - 1];
       } else {
-        direction = 2;
         min_cost = c_up;
+        parent_len = len_buf[alpha][j];
       }
-      const scalar_t cij = distances_xy[i][j] + min_cost;
-      trace_xy[diag][k] = direction;
-      buffers[gamma][j] = cij;
+      cost_buf[gamma][j] = distances_xy[i][j] + min_cost;
+      len_buf[gamma][j] = static_cast<uint16_t>(parent_len + 1);
     }
     __syncthreads();
 
@@ -111,29 +108,8 @@ __global__ void dtw_kernel(
   }
 
   if (threadIdx.x == 0) {
-    const scalar_t final_cost = buffers[alpha][M - 1];
-    int32_t path_len = 1;
-    int32_t i = N - 1;
-    int32_t j = M - 1;
-    while (i > 0 && j > 0) {
-      const int32_t d = i + j;
-      const int32_t kk = j - max(0, d - (N - 1));
-      const int8_t dir = trace_xy[d][kk];
-      if (dir == 0) {
-        i--;
-        j--;
-      } else if (dir == 1) {
-        j--;
-      } else {
-        i--;
-      }
-      path_len++;
-    }
-    if (i == 0)
-      path_len += j;
-    if (j == 0)
-      path_len += i;
-
+    const scalar_t final_cost = cost_buf[alpha][M - 1];
+    const uint16_t path_len = len_buf[alpha][M - 1];
     const scalar_t result = final_cost / static_cast<scalar_t>(path_len);
     out[x][y] = result;
     if (symmetric)
@@ -142,15 +118,21 @@ __global__ void dtw_kernel(
 }
 
 template <typename distances_t, typename sx_t>
-void dtw_batch_cuda_impl(
-    Tensor& out, Tensor& trace, const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric,
-    dim3 num_blocks, int num_threads, cudaStream_t stream, bool needs_64bit) {
-  STD_TORCH_CHECK(
-      sy.scalar_type() == torch::headeronly::CppTypeToScalarType<sx_t>::value, "sy dtype does not match sx dtype");
+void dtw_batch_cuda_impl(Tensor& out, const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+  const int64_t nx = distances.size(0);
+  const int64_t ny = distances.size(1);
+  const int64_t max_x = distances.size(2);
+  const int64_t max_y = distances.size(3);
+  const dim3 num_blocks = symmetric ? dim3(static_cast<unsigned int>(nx * (nx - 1) / 2)) : dim3(nx, ny);
+  const int64_t max_diag = max_x < max_y ? max_x : max_y;
+  const int num_threads = max_diag > 1024 ? 1024 : static_cast<int>(max_diag);
+  const bool needs_64bit = nx * ny * max_x * max_y > std::numeric_limits<int32_t>::max();
+  torch::stable::accelerator::DeviceIndex device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
+  cudaStream_t stream = (cudaStream_t)torch::stable::accelerator::getCurrentStream(device_idx).id();
+
   if (needs_64bit) {
     dtw_kernel<distances_t, sx_t, int64_t><<<num_blocks, num_threads, 0, stream>>>(
         packed_accessor32<distances_t, 2>(out),
-        packed_accessor64<int8_t, 4>(trace),
         packed_accessor64<distances_t, 4>(distances),
         packed_accessor32<sx_t, 1>(sx),
         packed_accessor32<sx_t, 1>(sy),
@@ -158,7 +140,6 @@ void dtw_batch_cuda_impl(
   } else {
     dtw_kernel<distances_t, sx_t, int32_t><<<num_blocks, num_threads, 0, stream>>>(
         packed_accessor32<distances_t, 2>(out),
-        packed_accessor32<int8_t, 4>(trace),
         packed_accessor32<distances_t, 4>(distances),
         packed_accessor32<sx_t, 1>(sx),
         packed_accessor32<sx_t, 1>(sy),
@@ -168,51 +149,38 @@ void dtw_batch_cuda_impl(
 
 Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
   STD_TORCH_CHECK(distances.dim() == 4, "distances must be a 4D tensor");
-  STD_TORCH_CHECK(sx.dim() == 1 && sy.dim() == 1, "sx and sy must be 1D tensors");
-  STD_TORCH_CHECK(sx.is_cuda() && sy.is_cuda(), "sx and sy must be on CUDA");
-  STD_TORCH_CHECK(
-      sx.size(0) == distances.size(0) && sy.size(0) == distances.size(1),
-      "sx and sy sizes must match the first two dimensions of distances");
-  STD_TORCH_CHECK(
-      !symmetric || distances.size(0) == distances.size(1),
-      "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
 
   const int64_t nx = distances.size(0);
   const int64_t ny = distances.size(1);
   const int64_t max_x = distances.size(2);
   const int64_t max_y = distances.size(3);
 
+  STD_TORCH_CHECK(sx.dim() == 1 && sy.dim() == 1, "sx and sy must be 1D tensors");
+  STD_TORCH_CHECK(sx.is_cuda() && sy.is_cuda(), "sx and sy must be on CUDA");
+  STD_TORCH_CHECK(
+      sx.size(0) == nx && sy.size(0) == ny, "sx and sy sizes must match the first two dimensions of distances");
+  STD_TORCH_CHECK(!symmetric || nx == ny, "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
   STD_TORCH_CHECK(nx > 0 && ny > 0 && max_x > 0 && max_y > 0, "Empty input tensor");
+  STD_TORCH_CHECK(max_y <= MAX_DIAG_LEN, "Last dimension > 1638: too large to use CUDA shared memory");
+  STD_TORCH_CHECK(
+      max_x + max_y - 1 <= std::numeric_limits<uint16_t>::max(),
+      "Sum of sequence lengths exceeds uint16_t path-length capacity");
+  STD_TORCH_CHECK(sy.scalar_type() == sx.scalar_type(), "sx and sy dtypes do not match");
 
-  const int64_t num_diags = max_x + max_y - 1;
-  const int64_t max_diag = max_x < max_y ? max_x : max_y;
-  Tensor trace = torch::stable::new_empty(
-      distances, {nx, ny, num_diags, max_diag}, std::make_optional(torch::headeronly::ScalarType::Char));
   Tensor out = torch::stable::new_zeros(distances, {nx, ny});
-
   if (symmetric && nx <= 1)
     return out;
-  const dim3 num_blocks = symmetric ? dim3(static_cast<unsigned int>(nx * (nx - 1) / 2)) : dim3(nx, ny);
-  const int num_threads = max_diag > 1024 ? 1024 : static_cast<int>(max_diag);
-  torch::stable::accelerator::DeviceIndex device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
-  cudaStream_t stream = (cudaStream_t)torch::stable::accelerator::getCurrentStream(device_idx).id();
-  const int64_t max_elems = nx * ny * (max_x * max_y < num_diags * max_diag ? num_diags * max_diag : max_x * max_y);
-  const bool needs_64bit = max_elems > std::numeric_limits<int32_t>::max();
-
   THO_DISPATCH_V2(
       distances.scalar_type(),
       "dtw_batch_cuda_impl",
       AT_WRAP([&] {
         using distances_t = scalar_t;
-        constexpr int64_t max_diag_len = SHARED_MEM_SIZE / (3 * sizeof(distances_t));
-        STD_TORCH_CHECK(max_y <= max_diag_len, "Diagonal too large to use CUDA shared memory");
         THO_DISPATCH_V2(
             sx.scalar_type(),
             "dtw_batch_cuda_impl_2",
             AT_WRAP([&] {
               using sx_t = scalar_t;
-              (dtw_batch_cuda_impl<distances_t, sx_t>(
-                  out, trace, distances, sx, sy, symmetric, num_blocks, num_threads, stream, needs_64bit));
+              (dtw_batch_cuda_impl<distances_t, sx_t>(out, distances, sx, sy, symmetric));
             }),
             AT_INTEGRAL_TYPES_V2);
       }),
