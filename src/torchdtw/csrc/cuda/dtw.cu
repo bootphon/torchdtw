@@ -53,6 +53,8 @@ __global__ void dtw_kernel(
     return;
   const int32_t N = static_cast<int32_t>(sx[x]);
   const int32_t M = static_cast<int32_t>(sy[y]);
+  if (N <= 0 || M <= 0)
+    return;
 
   __shared__ scalar_t cost_buf[3][MAX_DIAG_LEN];
   __shared__ uint16_t len_buf[3][MAX_DIAG_LEN];
