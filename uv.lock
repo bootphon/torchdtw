@@ -93,7 +93,6 @@ dependencies = [
     { name = "numpy" },
     { name = "torch" },
     { name = "torchdtw" },
-    { name = "triton" },
 ]
 
 [package.metadata]
@@ -102,7 +101,6 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.3.4" },
     { name = "torch", specifier = ">=2.9.0" },
     { name = "torchdtw", editable = "." },
-    { name = "triton", specifier = ">=3.5.0" },
 ]
 
 [[package]]
