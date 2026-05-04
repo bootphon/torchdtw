@@ -167,6 +167,16 @@ void dtw_batch_cuda_impl(
 }
 
 Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+  STD_TORCH_CHECK(distances.dim() == 4, "distances must be a 4D tensor");
+  STD_TORCH_CHECK(sx.dim() == 1 && sy.dim() == 1, "sx and sy must be 1D tensors");
+  STD_TORCH_CHECK(sx.is_cuda() && sy.is_cuda(), "sx and sy must be on CUDA");
+  STD_TORCH_CHECK(
+      sx.size(0) == distances.size(0) && sy.size(0) == distances.size(1),
+      "sx and sy sizes must match the first two dimensions of distances");
+  STD_TORCH_CHECK(
+      !symmetric || distances.size(0) == distances.size(1),
+      "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
+
   const int64_t nx = distances.size(0);
   const int64_t ny = distances.size(1);
   const int64_t max_x = distances.size(2);
@@ -213,6 +223,7 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
 }
 
 Tensor dtw_cuda(const Tensor& distances) {
+  STD_TORCH_CHECK(distances.dim() == 2, "distances must be a 2D tensor");
   Tensor sx = torch::stable::new_empty(distances, {1}, std::make_optional(torch::headeronly::ScalarType::Long));
   torch::stable::fill_(sx, distances.size(0));
   Tensor sy = torch::stable::new_empty(distances, {1}, std::make_optional(torch::headeronly::ScalarType::Long));

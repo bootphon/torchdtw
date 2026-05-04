@@ -57,8 +57,7 @@ def dtw_batch(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, *, sy
 def _(distances: torch.Tensor) -> torch.Tensor:
     """Register the FakeTensor kernel for dtw, for compatibility with torch.compile."""
     torch._check(distances.ndim == 2)
-    torch._check(distances.dtype == torch.float32)
-    return torch.empty((), dtype=torch.float32, layout=distances.layout, device=distances.device)
+    return torch.empty((), dtype=distances.dtype, layout=distances.layout, device=distances.device)
 
 
 @torch.library.register_fake("torchdtw::dtw_batch")
@@ -67,9 +66,8 @@ def _(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, symmetric: bo
     torch._check(distances.ndim == 4)
     torch._check(sx.ndim == 1)
     torch._check(sy.ndim == 1)
-    torch._check(distances.dtype == torch.float32)
-    torch._check(sx.dtype == torch.long)
-    torch._check(sy.dtype == torch.long)
+    torch._check(not (sx.dtype.is_complex or sx.dtype.is_floating_point))
+    torch._check(sx.dtype == sy.dtype)
     torch._check(isinstance(symmetric, bool))
     nx, ny, _, _ = distances.shape
-    return torch.empty((nx, ny), dtype=torch.float32, layout=distances.layout, device=distances.device)
+    return torch.empty((nx, ny), dtype=distances.dtype, layout=distances.layout, device=distances.device)
