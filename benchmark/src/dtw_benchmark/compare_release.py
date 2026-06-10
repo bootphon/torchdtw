@@ -38,6 +38,9 @@ BATCH_CONFIGS = [
     (4, 4, 128, 128, False),
     (8, 8, 256, 256, True),
     (4, 8, 256, 512, False),
+    (64, 64, 8, 8, True),
+    (32, 32, 16, 16, True),
+    (16, 32, 32, 32, False),
 ]
 
 
@@ -77,6 +80,7 @@ def measure_batch(
     label: str,
     *,
     device: torch.device,
+    num_threads: int,
     min_run_time: float,
     seed: int,
 ) -> tuple[torch.Tensor, Measurement]:
@@ -94,12 +98,14 @@ def measure_batch(
 
     out = torchdtw.dtw_batch(d, sx, sy, symmetric=symmetric).detach().cpu().clone()
     sync = "; torch.cuda.synchronize()" if d.is_cuda else ""
+    threads_label = f", t={num_threads}" if device.type == "cpu" else ""
     t = Timer(
         stmt=f"dtw_batch(d, sx, sy, symmetric=sym){sync}",
         setup="from torchdtw import dtw_batch\nimport torch",
         globals={"d": d, "sx": sx, "sy": sy, "sym": symmetric},
+        num_threads=num_threads,
         label=f"dtw_batch / {device.type}",
-        sub_label=f"n={n1}x{n2}, s={s1}x{s2}, {'sym' if symmetric else 'asym'}",
+        sub_label=f"n={n1}x{n2}, s={s1}x{s2}, {'sym' if symmetric else 'asym'}{threads_label}",
         description=label,
     ).blocked_autorange(min_run_time=min_run_time)
     return out, t
@@ -110,14 +116,23 @@ def measure_all(label: str, *, min_run_time: float, seed: int) -> tuple[dict, li
     outputs, timings = {}, []
     devices = [torch.device("cpu")] + ([torch.device("cuda")] if torch.cuda.is_available() else [])
     for device in devices:
+        thread_counts = sorted({1, torch.get_num_threads()}) if device.type == "cpu" else [1]
         for shape in DTW_SHAPES:
             out, t = measure_dtw(shape, label, device=device, min_run_time=min_run_time, seed=seed)
             outputs[("dtw", device.type, shape)] = out
             timings.append(t)
         for cfg in BATCH_CONFIGS:
-            out, t = measure_batch(cfg, label, device=device, min_run_time=min_run_time, seed=seed)
-            outputs[("dtw_batch", device.type, cfg)] = out
-            timings.append(t)
+            for num_threads in thread_counts:
+                out, t = measure_batch(
+                    cfg,
+                    label,
+                    device=device,
+                    num_threads=num_threads,
+                    min_run_time=min_run_time,
+                    seed=seed,
+                )
+                outputs[("dtw_batch", device.type, cfg)] = out
+                timings.append(t)
     return outputs, timings
 
 
@@ -173,9 +188,9 @@ def driver(*, min_run_time: float, seed: int) -> None:
         subprocess.run(local_cmd, check=True)
         local = pickle.loads(local_pkl.read_bytes())
 
-    print(f"Released torchdtw version: {released['version']}")
-    print(f"Local torchdtw version:    {local['version']}")
-    print("Correctness (current vs released):")
+    print(f"Reference torchdtw version: {released['version']}")
+    print(f"Current torchdtw version:   {local['version']}")
+    print("Correctness (current vs reference):")
 
     mismatches = 0
     for key, ref in released["outputs"].items():
