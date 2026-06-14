@@ -150,11 +150,12 @@ def measure_and_dump(label: str, output: str | Path, *, min_run_time: float, see
     Path(output).write_bytes(dump)
 
 
-def driver(*, min_run_time: float, seed: int) -> None:
+def driver(*, min_run_time: float, seed: int, path_wheel: str | Path | None = None) -> None:
     """Driver for measurements across versions."""
     script = str(Path(__file__).resolve())
     common = ["measure", "--min-run-time", str(min_run_time), "--seed", str(seed)]
-    released = latest_version()
+    reference_version = latest_version()
+    reference = f"torchdtw=={reference_version}" if path_wheel is None else str(path_wheel)
 
     with tempfile.TemporaryDirectory() as tmp:
         released_pkl = Path(tmp) / "released.pkl"
@@ -163,14 +164,14 @@ def driver(*, min_run_time: float, seed: int) -> None:
             "run",
             "--no-project",
             "--with",
-            f"torchdtw=={released}",
+            reference,
             "python",
             script,
             *common,
             "--out",
             str(released_pkl),
             "--label",
-            f"released {released}",
+            f"released {reference_version}",
         ]
         print(" ".join(released_cmd))
         subprocess.run(released_cmd, check=True)
@@ -222,6 +223,7 @@ def main() -> None:
     drv = sub.add_parser("driver", help="Run the comparison (default)")
     drv.add_argument("--min-run-time", type=float, default=1)
     drv.add_argument("--seed", type=int, default=0)
+    drv.add_argument("--wheel", type=Path)
     m = sub.add_parser("measure", help="Internal: measure with whichever torchdtw is importable")
     m.add_argument("--output", type=Path, required=True)
     m.add_argument("--label", type=str, required=True)
@@ -235,7 +237,7 @@ def main() -> None:
     if args.cmd == "measure":
         measure_and_dump(args.label, args.output, min_run_time=args.min_run_time, seed=args.seed)
     else:
-        driver(min_run_time=args.min_run_time, seed=args.seed)
+        driver(min_run_time=args.min_run_time, seed=args.seed, path_wheel=args.wheel)
 
 
 if __name__ == "__main__":
