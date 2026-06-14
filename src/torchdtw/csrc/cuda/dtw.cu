@@ -18,6 +18,8 @@
 // 1638 for double, 2730 for float, 4096 for half/bfloat16.
 #define MAX_SHARED_BYTES 49152
 
+extern "C" AOTITorchError aoti_torch_get_current_cuda_stream(int32_t device_index, void** ret_stream);
+
 namespace torchdtw {
 
 using torch::stable::Tensor;
@@ -173,7 +175,12 @@ void dtw_batch_cuda_impl(Tensor& out, const Tensor& distances, const Tensor& sx,
       MAX_SHARED_BYTES / (3 * (sizeof(distances_t) + sizeof(uint16_t))),
       ": too large to use CUDA shared memory for this dtype");
   torch::stable::accelerator::DeviceIndex device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
-  cudaStream_t stream = (cudaStream_t)torch::stable::accelerator::getCurrentStream(device_idx).id();
+  // Available in PyTorch >= 2.13
+  // cudaStream_t stream =
+  //     static_cast<cudaStream_t>(torch::stable::accelerator::getCurrentStream(device_idx).nativeHandle());
+  void* stream_ptr = nullptr;
+  TORCH_ERROR_CODE_CHECK(aoti_torch_get_current_cuda_stream(device_idx, &stream_ptr));
+  cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
 
   if (needs_64bit) {
     dtw_kernel<distances_t, sx_t, int64_t><<<num_blocks, num_threads, smem_size, stream>>>(
