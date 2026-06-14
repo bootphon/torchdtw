@@ -1,5 +1,6 @@
 #include <Python.h>
 #include <algorithm>
+#include <cmath>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
@@ -179,22 +180,51 @@ void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Tensor& sx, 
     STD_TORCH_CHECK(static_cast<int64_t>(sy_a[j]) <= distances.size(3), "sy values must not exceed distances.size(3)");
   }
 
-  torch::stable::parallel_for(0, nx, 1, [&](int64_t start, int64_t end) {
-    std::vector<acc_t<distances_t>> workspace;
-    for (int64_t i = start; i < end; i++) {
-      const int64_t N = static_cast<int64_t>(sx_a[i]);
-      const int64_t start_j = symmetric ? i + 1 : 0;
-      for (int64_t j = start_j; j < ny; j++) {
+  if (symmetric) {
+    // Row i owns the pairs j > i, so a row-parallel split hands row 0 (ny-1 DTWs) and
+    // row nx-1 (none) wildly uneven work. Flatten the upper triangle into a single pair
+    // index b = j*(j-1)/2 + i (0 <= i < j) and parallelize over that, so every worker gets
+    // an equal count of pairs regardless of which rows they fall in.
+    const int64_t num_pairs = nx * (nx - 1) / 2;
+    torch::stable::parallel_for(0, num_pairs, 1, [&](int64_t start, int64_t end) {
+      std::vector<acc_t<distances_t>> workspace;
+      // Seek (i, j) for flat index `start` via the triangular-number inverse, corrected with
+      // integer steps to absorb double rounding; then advance incrementally to avoid a sqrt per pair.
+      int64_t j = static_cast<int64_t>((1.0 + std::sqrt(1.0 + 8.0 * static_cast<double>(start))) / 2.0);
+      while (j > 0 && j * (j - 1) / 2 > start)
+        j--;
+      while ((j + 1) * j / 2 <= start)
+        j++;
+      int64_t i = start - j * (j - 1) / 2;
+      for (int64_t b = start; b < end; b++) {
+        const int64_t N = static_cast<int64_t>(sx_a[i]);
         const int64_t M = static_cast<int64_t>(sy_a[j]);
-        if (N <= 0 || M <= 0)
-          continue;
-        out_a[i][j] = compute_dtw_value<distances_t>(distances_a[i][j], N, M, workspace);
-        if (symmetric) {
-          out_a[j][i] = out_a[i][j];
+        if (N > 0 && M > 0) {
+          const distances_t value = compute_dtw_value<distances_t>(distances_a[i][j], N, M, workspace);
+          out_a[i][j] = value;
+          out_a[j][i] = value;
+        }
+        if (++i == j) {
+          i = 0;
+          j++;
         }
       }
-    }
-  });
+    });
+  } else {
+    // Each row does exactly ny pairs, so a row-parallel split is already balanced.
+    torch::stable::parallel_for(0, nx, 1, [&](int64_t start, int64_t end) {
+      std::vector<acc_t<distances_t>> workspace;
+      for (int64_t i = start; i < end; i++) {
+        const int64_t N = static_cast<int64_t>(sx_a[i]);
+        for (int64_t j = 0; j < ny; j++) {
+          const int64_t M = static_cast<int64_t>(sy_a[j]);
+          if (N <= 0 || M <= 0)
+            continue;
+          out_a[i][j] = compute_dtw_value<distances_t>(distances_a[i][j], N, M, workspace);
+        }
+      }
+    });
+  }
 }
 
 Tensor dtw_batch_cpu(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
