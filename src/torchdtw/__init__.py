@@ -6,7 +6,7 @@ import torch
 
 from . import _C  # noqa: F401 # ty: ignore[unresolved-import]
 
-__all__ = ["dtw", "dtw_batch"]
+__all__ = ["dtw", "dtw_batch", "dtw_path"]
 
 
 class CUDAOnWindowsError(RuntimeError):
