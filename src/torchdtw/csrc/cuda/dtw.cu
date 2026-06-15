@@ -178,6 +178,7 @@ __global__ void dtw_kernel(
 
 template <typename distances_t, typename sx_t>
 void dtw_batch_cuda_impl(Tensor& out, const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+  const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
   const int64_t nx = distances.size(0);
   const int64_t ny = distances.size(1);
   const int64_t max_x = distances.size(2);
