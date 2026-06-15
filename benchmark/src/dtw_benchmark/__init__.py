@@ -2,7 +2,15 @@
 
 from torchdtw import dtw, dtw_batch
 
-from .implementations import dtw_cython, dtw_cython_batch, dtw_numba, dtw_torch, dtw_triton
+from .implementations import (
+    dtw_cython,
+    dtw_cython_batch,
+    dtw_numba,
+    dtw_numba_batch,
+    dtw_torch,
+    dtw_triton,
+    dtw_triton_batch,
+)
 
 __all__ = [
     "dtw",
@@ -10,6 +18,8 @@ __all__ = [
     "dtw_cython",
     "dtw_cython_batch",
     "dtw_numba",
+    "dtw_numba_batch",
     "dtw_torch",
     "dtw_triton",
+    "dtw_triton_batch",
 ]

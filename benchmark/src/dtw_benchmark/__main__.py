@@ -1,54 +1,99 @@
-"""Run the benchmark."""
+"""Command-line interface for the DTW benchmark.
 
-import torch
-from torch.utils.benchmark import Compare, Measurement, Timer
+Two subcommands, each dispatching to its own logic module:
+- ``run``: benchmark torchdtw against the other implementations (``run_benchmark``).
+- ``compare``: compare the current checkout against the latest released torchdtw (``compare_release``).
 
-from . import dtw, dtw_cython, dtw_numba, dtw_torch, dtw_triton
+Both modules are imported lazily so that running one subcommand does not pay for the other's imports.
+"""
 
-DIMENSIONS = [16, 32, 64, 128, 256, 512]
+import argparse
+from pathlib import Path
 
 
-def measurements(dim: int, device: torch.device, min_run_time: float = 0.2) -> list[Measurement]:
-    """Measure DTW execution time."""
-    num_threads = torch.get_num_threads()
-    x = torch.testing.make_tensor((dim, dim), dtype=torch.float32, device=device)
-    outputs = [d(x) for d in [dtw, dtw_cython, dtw_numba, dtw_torch] + ([dtw_triton] if x.is_cuda else [])]
-    for out in outputs[1:]:
-        torch.testing.assert_close(out, outputs[0])
+def main() -> None:
+    """Parse the command line and dispatch to the selected subcommand."""
+    parser = argparse.ArgumentParser(
+        prog="python -m dtw_benchmark",
+        description=(
+            "Benchmarking tools for torchdtw's dtw and dtw_batch functions.\n\n"
+            "Each subcommand runs on the CPU and, when available, on CUDA, sweeping a range of "
+            "single-pair shapes and batched configurations. Every run checks correctness before timing."
+        ),
+        epilog=(
+            "examples:\n"
+            "  python -m dtw_benchmark run\n"
+            "  python -m dtw_benchmark run --output README.md\n"
+            "  python -m dtw_benchmark compare\n"
+            "  python -m dtw_benchmark compare --wheel dist/torchdtw-1.2.3-*.whl"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{run,compare}")
 
-    def measure(function: str, sub_label: str) -> Measurement:
-        return Timer(
-            stmt=f"{function}(x)",
-            setup=f"from dtw_benchmark import {function}",
-            globals={"x": x},
-            num_threads=num_threads,
-            label=device.type,
-            sub_label=sub_label,
-            description=str(dim),
-        ).blocked_autorange(min_run_time=min_run_time)
-
-    return ([measure("dtw_torch", "PyTorch naive")] if dim == DIMENSIONS[0] else []) + (
-        [measure("dtw_cython", "Cython"), measure("dtw_numba", "Numba")]
-        + ([measure("dtw_triton", "Triton")] if x.is_cuda else [])
-        + [measure("dtw", "PyTorch C++ extension")]
+    run_parser = sub.add_parser(
+        "run",
+        help="Benchmark torchdtw against other DTW implementations",
+        description=(
+            "Benchmark torchdtw's C++/CUDA extension against the other DTW implementations "
+            "(Cython, Numba, Triton, and a naive PyTorch loop) and print a timing comparison table."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    run_parser.add_argument(
+        "--min-run-time",
+        type=float,
+        default=0.2,
+        metavar="SECONDS",
+        help="Minimum measurement time per case passed to torch's blocked_autorange (default: %(default)s).",
+    )
+    run_parser.add_argument(
+        "--output",
+        type=Path,
+        metavar="FILE",
+        help="Markdown file to inject the results table into, between the <!-- benchmark --> markers.",
     )
 
+    compare_parser = sub.add_parser(
+        "compare",
+        help="Compare the current checkout against the latest released torchdtw",
+        description=(
+            "Compare the current torchdtw checkout against a released build for both correctness and "
+            "speed. The reference is measured in an isolated 'uv run' environment on identical inputs; "
+            "by default it is the latest release on PyPI, or a local wheel given with --wheel."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    compare_parser.add_argument(
+        "--min-run-time",
+        type=float,
+        default=1,
+        metavar="SECONDS",
+        help="Minimum measurement time per case passed to torch's blocked_autorange (default: %(default)s).",
+    )
+    compare_parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Seed for the random input tensors, shared by both versions (default: %(default)s).",
+    )
+    compare_parser.add_argument(
+        "--wheel",
+        type=Path,
+        metavar="WHEEL",
+        help="Reference torchdtw wheel to compare against, instead of the latest release on PyPI.",
+    )
 
-def benchmark(min_run_time: float = 0.2) -> None:
-    """Benchmark DTW."""
-    results = []
-    for device_type in ["cpu"] + (["cuda"] if torch.cuda.is_available() else []):
-        for dim in DIMENSIONS:
-            results.extend(measurements(dim, torch.device(device_type), min_run_time))
-    compare = Compare(results)
-    compare.colorize()
-    compare.print()
+    args = parser.parse_args()
+    if args.command == "run":
+        from .run_benchmark import benchmark  # noqa: PLC0415
+
+        benchmark(args.min_run_time, args.output)
+    else:
+        from .compare_release import driver  # noqa: PLC0415
+
+        driver(min_run_time=args.min_run_time, seed=args.seed, path_wheel=args.wheel)
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--min-run-time", type=float, default=0.2)
-    args = parser.parse_args()
-    benchmark(args.min_run_time)
+    main()

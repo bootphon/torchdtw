@@ -1,20 +1,21 @@
-# ruff: noqa: S301, S603, T201
+# ruff: noqa: S603, T201
 """Compare dtw and dtw_batch between the current checkout and the latest released torchdtw.
 
-Two roles:
-- `driver` (default): spawn a child via `uv run --with torchdtw==<ver>` to measure the released
-  version with identical inputs, run the local version in-process, then check correctness and
-  print a side-by-side timing comparison.
-- `measure`: internal entrypoint used by the driver inside the child process.
+Driven by the ``compare`` subcommand of ``python -m dtw_benchmark`` (the CLI lives in ``__main__``).
+``driver`` spawns a child via ``uv run --with torchdtw==<ver>`` to measure the released version with
+identical inputs, runs the local version the same way, then checks correctness and prints a
+side-by-side timing comparison.
 
-Usage:
-    uv run -m dtw_benchmark.compare_release
-    uv run -m dtw_benchmark.compare_release --min-run-time 0.5 --seed 1
+Each child runs this module directly as a script (``uv run ... python compare_release.py ...``) in a
+clean environment that only has ``torch`` and ``torchdtw`` installed. Running it as a script puts its
+own directory on ``sys.path``, so it only depends on ``torch`` and ``torchdtw`` -- not the rest of the
+``dtw_benchmark`` package, which would not be importable there.
 """
 
 import argparse
 import json
 import pickle
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import torch
+from packaging.utils import parse_wheel_filename
 from torch.utils.benchmark import Compare, Measurement, Timer
 
 import torchdtw
@@ -150,47 +152,50 @@ def measure_and_dump(label: str, output: str | Path, *, min_run_time: float, see
     Path(output).write_bytes(dump)
 
 
+def _measure_command(uv_args: list[str], *, output: Path, label: str, min_run_time: float, seed: int) -> list[str]:
+    """Build the ``uv run ... python compare_release.py`` command that measures one torchdtw version."""
+    child = [
+        "python",
+        str(Path(__file__)),
+        "--output",
+        str(output),
+        "--label",
+        label,
+        "--min-run-time",
+        str(min_run_time),
+        "--seed",
+        str(seed),
+    ]
+    return ["uv", "run", *uv_args, *child]
+
+
 def driver(*, min_run_time: float, seed: int, path_wheel: str | Path | None = None) -> None:
     """Driver for measurements across versions."""
-    script = str(Path(__file__).resolve())
-    common = ["measure", "--min-run-time", str(min_run_time), "--seed", str(seed)]
-    reference_version = latest_version()
-    reference = f"torchdtw=={reference_version}" if path_wheel is None else str(path_wheel)
+    if path_wheel is None:
+        reference_version = latest_version()
+        reference = f"torchdtw=={reference_version}"
+    else:
+        reference_version = str(parse_wheel_filename(Path(path_wheel).name)[1])
+        reference = str(path_wheel)
 
     with tempfile.TemporaryDirectory() as tmp:
         released_pkl = Path(tmp) / "released.pkl"
-        released_cmd = [
-            "uv",
-            "run",
-            "--no-project",
-            "--with",
-            reference,
-            "python",
-            script,
-            *common,
-            "--out",
-            str(released_pkl),
-            "--label",
-            f"released {reference_version}",
-        ]
-        print(" ".join(released_cmd))
+        released_cmd = _measure_command(
+            ["--no-project", "--with", reference],
+            output=released_pkl,
+            label=f"reference {reference_version}",
+            min_run_time=min_run_time,
+            seed=seed,
+        )
+        print(shlex.join(released_cmd))
         subprocess.run(released_cmd, check=True)
-        released = pickle.loads(released_pkl.read_bytes())
+        released = pickle.loads(released_pkl.read_bytes())  # noqa: S301
 
         local_pkl = Path(tmp) / "local.pkl"
-        local_cmd = [
-            "uv",
-            "run",
-            script,
-            *common,
-            "--out",
-            str(local_pkl),
-            "--label",
-            "current",
-        ]
-        print(" ".join(local_cmd))
+        local_cmd = _measure_command([], output=local_pkl, label="current", min_run_time=min_run_time, seed=seed)
+        print(shlex.join(local_cmd))
         subprocess.run(local_cmd, check=True)
-        local = pickle.loads(local_pkl.read_bytes())
+        local = pickle.loads(local_pkl.read_bytes())  # noqa: S301
 
     print(f"Reference torchdtw version: {released['version']}")
     print(f"Current torchdtw version:   {local['version']}")
@@ -216,29 +221,16 @@ def driver(*, min_run_time: float, seed: int, path_wheel: str | Path | None = No
         sys.exit(1)
 
 
-def main() -> None:
-    """Entry-point."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="cmd")
-    drv = sub.add_parser("driver", help="Run the comparison (default)")
-    drv.add_argument("--min-run-time", type=float, default=1)
-    drv.add_argument("--seed", type=int, default=0)
-    drv.add_argument("--wheel", type=Path)
-    m = sub.add_parser("measure", help="Internal: measure with whichever torchdtw is importable")
-    m.add_argument("--output", type=Path, required=True)
-    m.add_argument("--label", type=str, required=True)
-    m.add_argument("--min-run-time", type=float, required=True)
-    m.add_argument("--seed", type=int, required=True)
-
-    argv = sys.argv[1:]
-    if not argv or argv[0] not in {"driver", "measure", "-h", "--help"}:
-        argv = ["driver", *argv]
-    args = parser.parse_args(argv)
-    if args.cmd == "measure":
-        measure_and_dump(args.label, args.output, min_run_time=args.min_run_time, seed=args.seed)
-    else:
-        driver(min_run_time=args.min_run_time, seed=args.seed, path_wheel=args.wheel)
+def _child_main() -> None:
+    """Child entry point: measure one torchdtw version and dump the result. Run by the driver via uv."""
+    parser = argparse.ArgumentParser(description="Measure one torchdtw version (internal child of 'compare').")
+    parser.add_argument("--output", type=Path, required=True, help="Path to write the pickled measurements to.")
+    parser.add_argument("--label", required=True, help="Label identifying this version in the comparison.")
+    parser.add_argument("--min-run-time", type=float, required=True, help="min_run_time for blocked_autorange.")
+    parser.add_argument("--seed", type=int, required=True, help="Seed for the random input tensors.")
+    args = parser.parse_args()
+    measure_and_dump(args.label, args.output, min_run_time=args.min_run_time, seed=args.seed)
 
 
 if __name__ == "__main__":
-    main()
+    _child_main()
