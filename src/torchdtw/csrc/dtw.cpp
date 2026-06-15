@@ -36,38 +36,43 @@ template <typename T, size_t N> inline TensorAccessor<T, N> accessor(Tensor t) {
   return TensorAccessor<T, N>(reinterpret_cast<T*>(t.data_ptr()), t.sizes().data(), t.strides().data());
 }
 
-// Fills `cost` (a row-major N*M buffer) with the accumulated DTW cost matrix.
+template <typename scalar_t>
+using acc_t = std::conditional_t<
+    std::is_same_v<scalar_t, torch::headeronly::Half> || std::is_same_v<scalar_t, torch::headeronly::BFloat16>, float,
+    scalar_t>;
+
 template <typename scalar_t>
 static void
-compute_dtw_cost(const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M, scalar_t* cost) {
-  cost[0] = distances_a[0][0];
+compute_dtw_cost(const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M, acc_t<scalar_t>* cost) {
+  using acc = acc_t<scalar_t>;
+  cost[0] = static_cast<acc>(distances_a[0][0]);
   for (int64_t i = 1; i < N; i++) {
-    cost[i * M] = distances_a[i][0] + cost[(i - 1) * M];
+    cost[i * M] = static_cast<acc>(distances_a[i][0]) + cost[(i - 1) * M];
   }
   for (int64_t j = 1; j < M; j++) {
-    cost[j] = distances_a[0][j] + cost[j - 1];
+    cost[j] = static_cast<acc>(distances_a[0][j]) + cost[j - 1];
   }
   for (int64_t i = 1; i < N; i++) {
     const auto distances_i = distances_a[i];
-    scalar_t* row = cost + i * M;
-    const scalar_t* prev = row - M;
+    acc* row = cost + i * M;
+    const acc* prev = row - M;
     for (int64_t j = 1; j < M; j++) {
-      row[j] = distances_i[j] + std::min({prev[j], prev[j - 1], row[j - 1]});
+      row[j] = static_cast<acc>(distances_i[j]) + std::min({prev[j], prev[j - 1], row[j - 1]});
     }
   }
 }
 
-template <typename scalar_t>
-static std::vector<std::pair<int64_t, int64_t>> compute_dtw_path(const scalar_t* cost, int64_t N, int64_t M) {
+template <typename cost_t>
+static std::vector<std::pair<int64_t, int64_t>> compute_dtw_path(const cost_t* cost, int64_t N, int64_t M) {
   std::vector<std::pair<int64_t, int64_t>> path;
   path.reserve(N + M - 1);
   int64_t i = N - 1;
   int64_t j = M - 1;
   path.push_back({i, j});
   while (i > 0 && j > 0) {
-    const scalar_t c_up = cost[(i - 1) * M + j];
-    const scalar_t c_left = cost[i * M + j - 1];
-    const scalar_t c_diag = cost[(i - 1) * M + j - 1];
+    const cost_t c_up = cost[(i - 1) * M + j];
+    const cost_t c_left = cost[i * M + j - 1];
+    const cost_t c_diag = cost[(i - 1) * M + j - 1];
     if (c_diag <= c_left && c_diag <= c_up) {
       i--;
       j--;
@@ -91,19 +96,21 @@ static std::vector<std::pair<int64_t, int64_t>> compute_dtw_path(const scalar_t*
 }
 
 template <typename scalar_t>
-static scalar_t compute_dtw(
-    const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M, std::vector<scalar_t>& workspace) {
+static scalar_t compute_dtw_value(
+    const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M,
+    std::vector<acc_t<scalar_t>>& workspace) {
+  using acc = acc_t<scalar_t>;
   if (static_cast<int64_t>(workspace.size()) < N * M) {
     workspace.resize(N * M);
   }
   compute_dtw_cost<scalar_t>(distances_a, N, M, workspace.data());
-  const auto path = compute_dtw_path<scalar_t>(workspace.data(), N, M);
+  const auto path = compute_dtw_path<acc>(workspace.data(), N, M);
   // For integral dtypes divide in int64: casting the path length to a narrow dtype
   // can yield 0 (e.g. 256 as int8) and trap on integer division by zero.
   if constexpr (std::is_integral_v<scalar_t>) {
     return static_cast<scalar_t>(workspace[N * M - 1] / static_cast<int64_t>(path.size()));
   } else {
-    return workspace[N * M - 1] / static_cast<scalar_t>(path.size());
+    return static_cast<scalar_t>(workspace[N * M - 1] / static_cast<acc>(path.size()));
   }
 }
 
@@ -117,8 +124,9 @@ Tensor dtw_cpu(const Tensor& distances) {
       distances.scalar_type(),
       "compute_dtw",
       AT_WRAP([&] {
-        std::vector<scalar_t> workspace;
-        const scalar_t result = compute_dtw<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, workspace);
+        // Reuse scratch across calls on this thread to avoid malloc/free churn for many small DTWs.
+        thread_local std::vector<acc_t<scalar_t>> workspace;
+        const scalar_t result = compute_dtw_value<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, workspace);
         torch::stable::fill_(out, result);
       }),
       AT_ALL_TYPES,
@@ -137,9 +145,9 @@ Tensor dtw_path_cpu(const Tensor& distances) {
       distances.scalar_type(),
       "compute_dtw_path",
       AT_WRAP([&] {
-        std::vector<scalar_t> cost(N * M);
+        std::vector<acc_t<scalar_t>> cost(N * M);
         compute_dtw_cost<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, cost.data());
-        path = compute_dtw_path<scalar_t>(cost.data(), N, M);
+        path = compute_dtw_path<acc_t<scalar_t>>(cost.data(), N, M);
       }),
       AT_ALL_TYPES,
       torch::headeronly::ScalarType::Half,
@@ -172,7 +180,7 @@ void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Tensor& sx, 
   }
 
   torch::stable::parallel_for(0, nx, 1, [&](int64_t start, int64_t end) {
-    std::vector<distances_t> workspace;
+    std::vector<acc_t<distances_t>> workspace;
     for (int64_t i = start; i < end; i++) {
       const int64_t N = static_cast<int64_t>(sx_a[i]);
       const int64_t start_j = symmetric ? i + 1 : 0;
@@ -180,7 +188,7 @@ void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Tensor& sx, 
         const int64_t M = static_cast<int64_t>(sy_a[j]);
         if (N <= 0 || M <= 0)
           continue;
-        out_a[i][j] = compute_dtw<distances_t>(distances_a[i][j], N, M, workspace);
+        out_a[i][j] = compute_dtw_value<distances_t>(distances_a[i][j], N, M, workspace);
         if (symmetric) {
           out_a[j][i] = out_a[i][j];
         }

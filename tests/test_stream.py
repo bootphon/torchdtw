@@ -79,3 +79,29 @@ def test_dtw_batch_cuda_graph() -> None:
     torch.cuda.synchronize()
 
     assert_equal(out.cpu(), expected.cpu())
+
+
+@pytest.mark.requires_gpu
+def test_dtw_batch_compile_cuda_graph() -> None:
+    """dtw_batch must compose with torch.compile(mode="reduce-overhead").
+
+    That mode wraps the compiled region in CUDA graphs (capture on the warmup iterations,
+    replay afterwards), so it exercises the same capturability as the manual graph test
+    through the torch.compile path -- and requires the registered fake kernel to trace.
+    Each replay must return the eager result.
+    """
+    d, sx = _batch()
+    d, sx = d.cuda(), sx.cuda()
+    expected = dtw_batch(d, sx, sx, symmetric=False)
+    torch.cuda.synchronize()
+
+    torch.compiler.reset()
+    compiled = torch.compile(dtw_batch, mode="reduce-overhead", fullgraph=True)
+    # The first iterations warm up and capture; later ones replay the graph. reduce-overhead
+    # reuses a static output buffer, so clone before the next call overwrites it.
+    actual = None
+    for _ in range(4):
+        actual = compiled(d, sx, sx, symmetric=False).clone()
+    torch.cuda.synchronize()
+
+    assert_equal(actual.cpu(), expected.cpu())

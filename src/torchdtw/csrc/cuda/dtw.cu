@@ -14,8 +14,10 @@
 
 // Default shared memory budget of 48KiB per block, shared by 3 cost diagonal buffers and
 // 3 path-length diagonal buffers, each of length distances.size(3). The buffers are allocated
-// dynamically at launch so the per-dtype capacity is 49152 / (3 * (sizeof(scalar_t) + sizeof(uint16_t))):
-// 1638 for double, 2730 for float, 4096 for half/bfloat16.
+// dynamically at launch so the per-dtype capacity is 49152 / (3 * (sizeof(acc_t) + sizeof(uint16_t))):
+// 1638 for double, 2730 for float/half/bfloat16. The cost buffers hold the accumulator type
+// (acc_t<scalar_t>, float for half/bfloat16), not the storage type, so half/bfloat16 share float's
+// capacity rather than getting the wider 4096 that 2-byte storage would allow.
 #define MAX_SHARED_BYTES 49152
 
 extern "C" AOTITorchError aoti_torch_get_current_cuda_stream(int32_t device_index, void** ret_stream);
@@ -38,6 +40,11 @@ template <typename T, size_t N> inline PackedTensorAccessor64<T, N> packed_acces
       static_cast<typename PackedTensorAccessor64<T, N>::PtrType>(t.data_ptr()), t.sizes().data(), t.strides().data());
 }
 
+template <typename scalar_t>
+using acc_t = std::conditional_t<
+    std::is_same_v<scalar_t, torch::headeronly::Half> || std::is_same_v<scalar_t, torch::headeronly::BFloat16>, float,
+    scalar_t>;
+
 // Wavefront DP over anti-diagonals. Each cell tracks its cost and the length of the optimal path
 // reaching it (one more than its chosen parent's path length). The cost of (N-1, M-1) divided by
 // its path length is the final result, so no traceback is needed.
@@ -48,7 +55,11 @@ __global__ void dtw_kernel(
   int32_t x, y;
   if (symmetric) {
     const int32_t b = static_cast<int32_t>(blockIdx.x);
-    y = static_cast<int32_t>((1.0 + sqrt(1.0 + 8.0 * static_cast<double>(b))) / 2.0);
+    y = static_cast<int32_t>((1.0f + sqrtf(1.0f + 8.0f * static_cast<float>(b))) / 2.0f);
+    while (static_cast<int64_t>(y) * (y - 1) / 2 > b)
+      y--;
+    while (static_cast<int64_t>(y + 1) * y / 2 <= b)
+      y++;
     x = b - y * (y - 1) / 2;
   } else {
     x = blockIdx.x;
@@ -58,20 +69,28 @@ __global__ void dtw_kernel(
     return;
   const int32_t N = static_cast<int32_t>(sx[x]);
   const int32_t M = static_cast<int32_t>(sy[y]);
-  if (N <= 0 || M <= 0)
+  if (N <= 0 || M <= 0) {
+    if (threadIdx.x == 0) {
+      out[x][y] = static_cast<scalar_t>(0);
+      if (symmetric)
+        out[y][x] = static_cast<scalar_t>(0);
+    }
     return;
+  }
 
+  // Accumulate cost in acc_t<scalar_t> (float for half/bfloat16) to limit rounding drift.
+  using acc_t = torchdtw::acc_t<scalar_t>;
   extern __shared__ unsigned char smem[];
   const int32_t buf_len = static_cast<int32_t>(distances.size(3));
-  scalar_t* const cost_smem = reinterpret_cast<scalar_t*>(smem);
+  acc_t* const cost_smem = reinterpret_cast<acc_t*>(smem);
   // Round the cost buffers' size up to 2 bytes so the uint16_t buffers are aligned for 1-byte dtypes.
-  const size_t len_offset = (3 * static_cast<size_t>(buf_len) * sizeof(scalar_t) + 1) & ~static_cast<size_t>(1);
+  const size_t len_offset = (3 * static_cast<size_t>(buf_len) * sizeof(acc_t) + 1) & ~static_cast<size_t>(1);
   uint16_t* const len_smem = reinterpret_cast<uint16_t*>(smem + len_offset);
   // Named pointers rotated by register swaps: a dynamically indexed pointer array would be
   // spilled to local memory and slow down every shared memory access in the wavefront loop.
-  scalar_t* cost_alpha = cost_smem;               // Last diagonal
-  scalar_t* cost_beta = cost_smem + buf_len;      // Second to last diagonal
-  scalar_t* cost_gamma = cost_smem + 2 * buf_len; // Buffer for the next diagonal
+  acc_t* cost_alpha = cost_smem;               // Last diagonal
+  acc_t* cost_beta = cost_smem + buf_len;      // Second to last diagonal
+  acc_t* cost_gamma = cost_smem + 2 * buf_len; // Buffer for the next diagonal
   uint16_t* len_alpha = len_smem;
   uint16_t* len_beta = len_smem + buf_len;
   uint16_t* len_gamma = len_smem + 2 * buf_len;
@@ -79,11 +98,11 @@ __global__ void dtw_kernel(
   const auto distances_xy = distances[x][y];
 
   if (threadIdx.x == 0) {
-    cost_gamma[0] = distances_xy[0][0];
+    cost_gamma[0] = static_cast<acc_t>(distances_xy[0][0]);
     len_gamma[0] = 1;
   }
   __syncthreads();
-  scalar_t* cost_temp = cost_beta;
+  acc_t* cost_temp = cost_beta;
   cost_beta = cost_alpha;
   cost_alpha = cost_gamma;
   cost_gamma = cost_temp;
@@ -100,7 +119,7 @@ __global__ void dtw_kernel(
     for (int32_t k = threadIdx.x; k < length; k += blockDim.x) {
       const int32_t i = start_i - k;
       const int32_t j = start_j + k;
-      scalar_t min_cost;
+      acc_t min_cost;
       uint16_t parent_len;
       // Boundary cells have a single valid parent. No sentinel cost is used for the invalid
       // parents: a real cost can reach the maximum of narrow integer dtypes and tie with it.
@@ -111,9 +130,9 @@ __global__ void dtw_kernel(
         min_cost = cost_alpha[j];
         parent_len = len_alpha[j];
       } else {
-        const scalar_t c_up = cost_alpha[j];
-        const scalar_t c_left = cost_alpha[j - 1];
-        const scalar_t c_diag = cost_beta[j - 1];
+        const acc_t c_up = cost_alpha[j];
+        const acc_t c_left = cost_alpha[j - 1];
+        const acc_t c_diag = cost_beta[j - 1];
         if (c_diag <= c_left && c_diag <= c_up) {
           min_cost = c_diag;
           parent_len = len_beta[j - 1];
@@ -125,12 +144,12 @@ __global__ void dtw_kernel(
           parent_len = len_alpha[j];
         }
       }
-      cost_gamma[j] = distances_xy[i][j] + min_cost;
+      cost_gamma[j] = static_cast<acc_t>(distances_xy[i][j]) + min_cost;
       len_gamma[j] = static_cast<uint16_t>(parent_len + 1);
     }
     __syncthreads();
 
-    scalar_t* const cost_temp = cost_beta;
+    acc_t* const cost_temp = cost_beta;
     cost_beta = cost_alpha;
     cost_alpha = cost_gamma;
     cost_gamma = cost_temp;
@@ -141,7 +160,7 @@ __global__ void dtw_kernel(
   }
 
   if (threadIdx.x == 0) {
-    const scalar_t final_cost = cost_alpha[M - 1];
+    const acc_t final_cost = cost_alpha[M - 1];
     const uint16_t path_len = len_alpha[M - 1];
     // For integral dtypes divide in int64 (as on CPU): casting the path length to a
     // narrow dtype can yield 0 (e.g. 256 as int8) and divide by zero.
@@ -149,7 +168,7 @@ __global__ void dtw_kernel(
     if constexpr (std::is_integral_v<scalar_t>) {
       result = static_cast<scalar_t>(static_cast<int64_t>(final_cost) / static_cast<int64_t>(path_len));
     } else {
-      result = final_cost / static_cast<scalar_t>(path_len);
+      result = static_cast<scalar_t>(final_cost / static_cast<acc_t>(path_len));
     }
     out[x][y] = result;
     if (symmetric)
@@ -165,14 +184,16 @@ void dtw_batch_cuda_impl(Tensor& out, const Tensor& distances, const Tensor& sx,
   const int64_t max_y = distances.size(3);
   const dim3 num_blocks = symmetric ? dim3(static_cast<unsigned int>(nx * (nx - 1) / 2)) : dim3(nx, ny);
   const int64_t max_diag = max_x < max_y ? max_x : max_y;
-  const int num_threads = max_diag > 1024 ? 1024 : static_cast<int>(max_diag);
+  const int capped_diag = max_diag > 1024 ? 1024 : static_cast<int>(max_diag);
+  const int num_threads = ((capped_diag + 31) / 32) * 32 > 1024 ? 1024 : ((capped_diag + 31) / 32) * 32;
   const bool needs_64bit = nx * ny * max_x * max_y > std::numeric_limits<int32_t>::max();
-  const size_t cost_bytes = (3 * static_cast<size_t>(max_y) * sizeof(distances_t) + 1) & ~static_cast<size_t>(1);
+  using acc_t = torchdtw::acc_t<distances_t>;
+  const size_t cost_bytes = (3 * static_cast<size_t>(max_y) * sizeof(acc_t) + 1) & ~static_cast<size_t>(1);
   const size_t smem_size = cost_bytes + 3 * static_cast<size_t>(max_y) * sizeof(uint16_t);
   STD_TORCH_CHECK(
       smem_size <= MAX_SHARED_BYTES,
       "distances.size(3) > ",
-      MAX_SHARED_BYTES / (3 * (sizeof(distances_t) + sizeof(uint16_t))),
+      MAX_SHARED_BYTES / (3 * (sizeof(acc_t) + sizeof(uint16_t))),
       ": too large to use CUDA shared memory for this dtype");
   torch::stable::accelerator::DeviceIndex device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
   // Available in PyTorch >= 2.13
@@ -220,7 +241,8 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
       "Sum of sequence lengths exceeds uint16_t path-length capacity");
   STD_TORCH_CHECK(sy.scalar_type() == sx.scalar_type(), "sx and sy dtypes do not match");
 
-  Tensor out = torch::stable::new_zeros(distances, {nx, ny});
+  Tensor out =
+      symmetric ? torch::stable::new_zeros(distances, {nx, ny}) : torch::stable::new_empty(distances, {nx, ny});
   if (symmetric && nx <= 1)
     return out;
   THO_DISPATCH_V2(
@@ -245,9 +267,10 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
 
 Tensor dtw_cuda(const Tensor& distances) {
   STD_TORCH_CHECK(distances.dim() == 2, "distances must be a 2D tensor");
-  Tensor sx = torch::stable::new_empty(distances, {1}, std::make_optional(torch::headeronly::ScalarType::Long));
+  Tensor sxy = torch::stable::new_empty(distances, {2}, std::make_optional(torch::headeronly::ScalarType::Long));
+  Tensor sx = torch::stable::narrow(sxy, 0, 0, 1);
+  Tensor sy = torch::stable::narrow(sxy, 0, 1, 1);
   torch::stable::fill_(sx, distances.size(0));
-  Tensor sy = torch::stable::new_empty(distances, {1}, std::make_optional(torch::headeronly::ScalarType::Long));
   torch::stable::fill_(sy, distances.size(1));
   Tensor result =
       dtw_batch_cuda(torch::stable::view(distances, {1, 1, distances.size(0), distances.size(1)}), sx, sy, false);

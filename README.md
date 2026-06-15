@@ -72,6 +72,12 @@ batches of sequences.
 
 A 2D tensor of shape (n1, n2) with the costs.
 
+## Performance
+
+For many DTWs on short sequences, prefer `dtw_batch` over a Python loop of `dtw` calls.
+A single `dtw_batch` launches one CUDA kernel (one block per pair) or one parallel CPU
+loop, amortizing dispatch, allocation, and launch overhead across the whole batch.
+
 ## Benchmark
 
 Check [this folder](https://github.com/mxmpl/torchdtw/tree/main/benchmark) for comparisons
