@@ -7,6 +7,7 @@
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/core/TensorAccessor.h>
 #include <torch/headeronly/util/Exception.h>
+#include <type_traits>
 #include <vector>
 
 extern "C" {
@@ -97,7 +98,13 @@ static scalar_t compute_dtw(
   }
   compute_dtw_cost<scalar_t>(distances_a, N, M, workspace.data());
   const auto path = compute_dtw_path<scalar_t>(workspace.data(), N, M);
-  return workspace[N * M - 1] / static_cast<scalar_t>(path.size());
+  // For integral dtypes divide in int64: casting the path length to a narrow dtype
+  // can yield 0 (e.g. 256 as int8) and trap on integer division by zero.
+  if constexpr (std::is_integral_v<scalar_t>) {
+    return static_cast<scalar_t>(workspace[N * M - 1] / static_cast<int64_t>(path.size()));
+  } else {
+    return workspace[N * M - 1] / static_cast<scalar_t>(path.size());
+  }
 }
 
 Tensor dtw_cpu(const Tensor& distances) {
