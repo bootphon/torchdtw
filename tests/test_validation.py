@@ -101,6 +101,16 @@ def test_dtw_batch_path_length_overflow() -> None:
 
 
 @pytest.mark.requires_gpu
+def test_dtw_batch_grid_dimension_too_large() -> None:
+    """CUDA dtw_batch rejects distances.size(1) beyond the CUDA grid.y limit (65535) with a clear message."""
+    d = torch.zeros((1, 70000, 1, 1), dtype=torch.float32, device="cuda")
+    sx = torch.ones(1, dtype=torch.long, device="cuda")
+    sy = torch.ones(70000, dtype=torch.long, device="cuda")
+    with pytest.raises(RuntimeError, match="CUDA grid limit"):
+        dtw_batch(d, sx, sy, symmetric=False)
+
+
+@pytest.mark.requires_gpu
 def test_dtw_batch_shared_memory_too_large() -> None:
     """CUDA dtw_batch rejects distances.size(3) too large to fit the dtype's shared-memory budget."""
     d = torch.zeros((1, 1, 1, 1700), dtype=torch.float64, device="cuda")  # over the ~1638 float64 cap

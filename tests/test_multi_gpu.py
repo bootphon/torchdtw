@@ -76,6 +76,17 @@ def test_dtw_batch_symmetric_non_default_device(n: int, x: int, low: float, high
 
 
 @pytest.mark.requires_multi_gpu
+def test_dtw_batch_lengths_must_match_distances_device() -> None:
+    """sx/sy on a different CUDA device than distances are rejected with a clear message."""
+    other = _other_device()
+    d, sx = fixed_batch()
+    d = d.to("cuda:0")
+    sx_other = sx.to(other)
+    with pytest.raises(RuntimeError, match="same CUDA device"):
+        dtw_batch(d, sx_other, sx_other, symmetric=False)
+
+
+@pytest.mark.requires_multi_gpu
 def test_dtw_batch_non_default_device_side_stream() -> None:
     """dtw_batch on a side stream of a non-default device must honour both the device and the stream."""
     other = _other_device()

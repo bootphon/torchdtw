@@ -234,6 +234,9 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
   STD_TORCH_CHECK(sx.dim() == 1 && sy.dim() == 1, "sx and sy must be 1D tensors");
   STD_TORCH_CHECK(sx.is_cuda() && sy.is_cuda(), "sx and sy must be on CUDA");
   STD_TORCH_CHECK(
+      sx.get_device() == distances.get_device() && sy.get_device() == distances.get_device(),
+      "sx and sy must be on the same CUDA device as distances");
+  STD_TORCH_CHECK(
       sx.size(0) == nx && sy.size(0) == ny, "sx and sy sizes must match the first two dimensions of distances");
   STD_TORCH_CHECK(!symmetric || nx == ny, "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
   STD_TORCH_CHECK(nx > 0 && ny > 0 && max_x > 0 && max_y > 0, "Empty input tensor");
@@ -241,6 +244,15 @@ Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& s
       max_x + max_y - 1 <= std::numeric_limits<uint16_t>::max(),
       "Sum of sequence lengths exceeds uint16_t path-length capacity");
   STD_TORCH_CHECK(sy.scalar_type() == sx.scalar_type(), "sx and sy dtypes do not match");
+  constexpr int64_t max_grid_x = 2147483647; // 2^31 - 1
+  constexpr int64_t max_grid_y = 65535;
+  if (symmetric) {
+    STD_TORCH_CHECK(
+        nx * (nx - 1) / 2 <= max_grid_x, "symmetric dtw_batch too large: nx*(nx-1)/2 exceeds the CUDA grid limit");
+  } else {
+    STD_TORCH_CHECK(nx <= max_grid_x, "distances.size(0) exceeds the CUDA grid limit of 2^31-1");
+    STD_TORCH_CHECK(ny <= max_grid_y, "distances.size(1) exceeds the CUDA grid limit of 65535");
+  }
 
   Tensor out =
       symmetric ? torch::stable::new_zeros(distances, {nx, ny}) : torch::stable::new_empty(distances, {nx, ny});
