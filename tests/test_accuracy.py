@@ -16,17 +16,13 @@ from .conftest import BATCH, DIM, HIGH_MINUS_LOW, LOW, make_tensor
 
 ACC_DTYPES = [torch.float16, torch.bfloat16]
 
-# One rounding to the storage dtype is <= 0.5 ulp ~= eps: fp16 eps ~ 4.9e-4, bf16 eps ~ 3.9e-3.
-TOL = {torch.float16: (1e-3, 1e-4), torch.bfloat16: (8e-3, 1e-3)}
-
 
 @pytest.mark.parametrize("dtype", ACC_DTYPES)
 @given(x=DIM, y=DIM, low=LOW, high_minus_low=HIGH_MINUS_LOW)
 def test_dtw_half_accuracy(dtype: torch.dtype, x: int, y: int, low: float, high_minus_low: float) -> None:
     """Dtw in half/bfloat16 stays accurate to the float32 result at the dtype's precision."""
     d = make_tensor((x, y), dtype=dtype, low=low, high=high_minus_low + low)
-    rtol, atol = TOL[dtype]
-    torch.testing.assert_close(dtw(d).float(), dtw(d.float()), rtol=rtol, atol=atol)
+    torch.testing.assert_close(dtw(d), dtw(d.float()).to(dtype))
 
 
 @pytest.mark.parametrize("dtype", ACC_DTYPES)
@@ -38,7 +34,6 @@ def test_dtw_batch_half_accuracy(
     d = make_tensor((n, m, x, y), dtype=dtype, low=low, high=high_minus_low + low)
     sx = make_tensor((n,), dtype=torch.long, low=1, high=x + 1)
     sy = make_tensor((m,), dtype=torch.long, low=1, high=y + 1)
-    rtol, atol = TOL[dtype]
-    out = dtw_batch(d, sx, sy, symmetric=False).float()
-    reference = dtw_batch(d.float(), sx, sy, symmetric=False)
-    torch.testing.assert_close(out, reference, rtol=rtol, atol=atol)
+    out = dtw_batch(d, sx, sy, symmetric=False)
+    reference = dtw_batch(d.float(), sx, sy, symmetric=False).to(dtype)
+    torch.testing.assert_close(out, reference)

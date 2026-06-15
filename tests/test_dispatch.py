@@ -6,7 +6,7 @@ from hypothesis import given
 
 from torchdtw import dtw, dtw_batch
 
-from .conftest import BATCH, DIM, make_tensor
+from .conftest import BATCH, DIM, assert_equal, make_tensor
 
 FLOATING_DTYPES = [torch.float64, torch.float32, torch.float16, torch.bfloat16]
 INTEGRAL_DTYPES = [torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64]
@@ -30,7 +30,7 @@ def test_dtw_dispatch_cpu(dtype: torch.dtype, x: int, y: int) -> None:
 def test_dtw_dispatch_cuda(dtype: torch.dtype, x: int, y: int) -> None:
     """Compare CPU and CUDA dtw outputs for every supported distances dtype."""
     d = make_tensor((x, y), dtype=dtype, low=0, high=4)
-    torch.testing.assert_close(dtw(d), dtw(d.cuda()).cpu())
+    assert_equal(dtw(d), dtw(d.cuda()).cpu())
 
 
 @pytest.mark.parametrize("dtype", DISTANCES_DTYPES)
@@ -53,7 +53,7 @@ def test_dtw_batch_distances_dispatch_cuda(dtype: torch.dtype, n: int, m: int, x
     d = make_tensor((n, m, x, y), dtype=dtype, low=0, high=4)
     sx = make_tensor((n,), dtype=torch.long, low=1, high=x + 1)
     sy = make_tensor((m,), dtype=torch.long, low=1, high=y + 1)
-    torch.testing.assert_close(
+    assert_equal(
         dtw_batch(d, sx, sy, symmetric=False),
         dtw_batch(d.cuda(), sx.cuda(), sy.cuda(), symmetric=False).cpu(),
     )
@@ -79,9 +79,7 @@ def test_dtw_batch_sx_dispatch_cuda(sx_dtype: torch.dtype, n: int, m: int, x: in
     d = make_tensor((n, m, x, y), dtype=torch.float32, low=0.0, high=1.0)
     sx = make_tensor((n,), dtype=sx_dtype, low=1, high=x + 1)
     sy = make_tensor((m,), dtype=sx_dtype, low=1, high=y + 1)
-    torch.testing.assert_close(
+    assert_equal(
         dtw_batch(d, sx, sy, symmetric=False),
         dtw_batch(d.cuda(), sx.cuda(), sy.cuda(), symmetric=False).cpu(),
-        rtol=0,
-        atol=0,
     )

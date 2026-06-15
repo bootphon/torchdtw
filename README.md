@@ -25,6 +25,9 @@ def dtw(distances: torch.Tensor) -> torch.Tensor
 
 Compute the DTW cost of the given ``distances`` 2D tensor.
 
+Use `+inf` to mask forbidden alignments. NaN distances are unsupported: the result is
+unspecified and may differ between the CPU and CUDA backends.
+
 **Arguments**:
 
 - `distances`: A 2D tensor of shape (n, m) representing the pairwise distances between two sequences.
@@ -42,6 +45,7 @@ def dtw_path(distances: torch.Tensor) -> torch.Tensor
 Compute the DTW path of the given ``distances`` 2D tensor.
 
 No CUDA variant or batched implementation are provided for now.
+Use `+inf` to mask forbidden alignments. NaN distances are unsupported and give an unspecified path.
 
 **Arguments**:
 
@@ -59,6 +63,10 @@ def dtw_batch(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, *,
 ```
 
 Compute the batched DTW cost on the ``distances`` 4D tensor.
+
+Only the `(sx[i], sy[j])` sub-block of each pair is read, so padding beyond the sequence lengths
+is ignored. Use `+inf` to mask forbidden alignments. NaN distances are unsupported: the result is
+unspecified and may differ between the CPU and CUDA backends.
 
 **Arguments**:
 
