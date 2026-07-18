@@ -20,7 +20,7 @@ dependencies = [
 requires = [
   "cython>=3.1.6",
   "numpy>=2.3.4",
-  "setuptools>=80.9.0",
+  "setuptools>=83.0.0",
 ]
 build-backend = "setuptools.build_meta"
 

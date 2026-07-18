@@ -37,7 +37,7 @@ test = [
 requires = [
   "ninja>=1.11",
   "numpy>=1.26.4",
-  "setuptools>=80.9.0",
+  "setuptools>=83.0.0",
   "setuptools-scm>=9.2.2",
   "torch>=2.10.0",
 ]
