@@ -37,7 +37,10 @@ def get_extension() -> Extension:
         raise CUDAArchListError
     sources = ["src/torchdtw/csrc/dtw.cpp"] + (["src/torchdtw/csrc/cuda/dtw.cu"] if use_cuda else [])
     compiler_flags, linker_flags = get_flags()
-    extra_compile_args = {"cxx": ["-DTORCH_TARGET_VERSION=0x020A000000000000", *compiler_flags], "nvcc": ["-O3"]}
+    extra_compile_args = {
+        "cxx": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-DTORCH_STABLE_ONLY", *compiler_flags],
+        "nvcc": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-O3"],
+    }
     extension = (CUDAExtension if use_cuda else CppExtension)(
         "torchdtw._C",
         sources,
