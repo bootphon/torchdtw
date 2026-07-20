@@ -11,12 +11,14 @@
 #include <type_traits>
 #include <vector>
 
-extern "C" {
 /* Creates a dummy empty _C module that can be imported from Python.
    The import from Python will load the .so consisting of this file
    in this extension, so that the STABLE_TORCH_LIBRARY static initializers
-   below are run. */
-PyObject* PyInit__C(void) {
+   below are run.
+   PyMODINIT_FUNC (rather than a bare extern "C") is required: it carries the
+   __declspec(dllexport) that makes the symbol visible on Windows, where
+   PyTorch's BuildExtension suppresses setuptools' automatic /EXPORT:PyInit__C. */
+PyMODINIT_FUNC PyInit__C(void) {
   static struct PyModuleDef module_def = {
       PyModuleDef_HEAD_INIT,
       "_C", /* name of module */
@@ -26,7 +28,6 @@ PyObject* PyInit__C(void) {
       NULL, /* methods */
   };
   return PyModule_Create(&module_def);
-}
 }
 
 namespace torchdtw {
