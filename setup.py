@@ -30,35 +30,47 @@ class CUDAArchListError(RuntimeError):
         )
 
 
-def get_extension() -> Extension:
-    """Either CUDA or CPU extension."""
+def get_extensions() -> list[Extension]:
+    """Return the CPU extension, plus the CUDA extension if CUDA is found.
+
+    The CUDA kernels live in a separate shared object so that the CPU one does not link against
+    libtorch_cuda or the CUDA runtime, and can be loaded with CPU-only or ROCm builds of PyTorch.
+    """
     use_cuda = CUDA_HOME is not None and sys.platform != "win32"
     if use_cuda and "TORCH_CUDA_ARCH_LIST" not in os.environ:
         raise CUDAArchListError
-    sources = ["src/torchdtw/csrc/dtw.cpp"] + (["src/torchdtw/csrc/cuda/dtw.cu"] if use_cuda else [])
     compiler_flags, linker_flags = get_flags()
     extra_compile_args = {
         "cxx": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-DTORCH_STABLE_ONLY", *compiler_flags],
         "nvcc": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-O3"],
     }
-    extension = (CUDAExtension if use_cuda else CppExtension)(
-        "torchdtw._C",
-        sources,
-        extra_compile_args=extra_compile_args,
-        extra_link_args=linker_flags,
-        py_limited_api=True,
-    )
+    extensions = [
+        CppExtension(
+            "torchdtw._C",
+            ["src/torchdtw/csrc/dtw.cpp"],
+            extra_compile_args=extra_compile_args,
+            extra_link_args=linker_flags,
+            py_limited_api=True,
+        )
+    ]
     if use_cuda:
+        cuda_extension = CUDAExtension(
+            "torchdtw._C_cuda",
+            ["src/torchdtw/csrc/cuda/dtw.cu"],
+            extra_compile_args=extra_compile_args,
+            py_limited_api=True,
+        )
         # Remove cudart so it does not appear in the .so's dependencies.
         # Cudart symbols are resolved at runtime from the cudart already loaded by PyTorch,
         # making the wheel compatible across CUDA major versions.
-        extension.libraries = [lib for lib in extension.libraries if "cudart" not in lib]
-    return extension
+        cuda_extension.libraries = [lib for lib in cuda_extension.libraries if "cudart" not in lib]
+        extensions.append(cuda_extension)
+    return extensions
 
 
 if __name__ == "__main__":
     setup(
-        ext_modules=[get_extension()],
+        ext_modules=get_extensions(),
         cmdclass={"build_ext": BuildExtension},
         options={"bdist_wheel": {"py_limited_api": "cp312"}},
     )

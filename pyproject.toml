@@ -74,10 +74,14 @@ ignore-names = ["_check"]
 ignore-names = ["F"]
 
 [tool.ruff.lint.per-file-ignores]
+"src/torchdtw/_C*.pyi" = ["N999"]
 "tests/*.py" = ["S101"]
 
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"
+
+[tool.ty.analysis]
+allowed-unresolved-imports = ["torchdtw._C*"]
 
 [tool.uv]
 cache-keys = [

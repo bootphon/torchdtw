@@ -1,3 +1,4 @@
+#include <Python.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <limits>
@@ -21,6 +22,21 @@
 #define MAX_SHARED_BYTES 49152
 
 extern "C" AOTITorchError aoti_torch_get_current_cuda_stream(int32_t device_index, void** ret_stream);
+
+/* Creates a dummy empty _C_cuda module, imported from Python only when
+   PyTorch is built with CUDA. Keeping it separate from _C lets CPU-only and
+   ROCm builds of PyTorch load _C without libtorch_cuda or cudart. */
+PyMODINIT_FUNC PyInit__C_cuda(void) {
+  static struct PyModuleDef module_def = {
+      PyModuleDef_HEAD_INIT,
+      "_C_cuda", /* name of module */
+      NULL,      /* module documentation, may be NULL */
+      -1,        /* size of per-interpreter state of the module,
+                    or -1 if the module keeps state in global variables. */
+      NULL,      /* methods */
+  };
+  return PyModule_Create(&module_def);
+}
 
 namespace torchdtw {
 
