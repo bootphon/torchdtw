@@ -324,7 +324,7 @@ Tensor dtw_cuda(const Tensor& distances) {
   torch::stable::fill_(sy, distances.size(1));
   Tensor result =
       dtw_batch_cuda(torch::stable::view(distances, {1, 1, distances.size(0), distances.size(1)}), sx, sy, false);
-  return torch::stable::view(result, {});
+  return torch::stable::view(result, torch::headeronly::IntHeaderOnlyArrayRef());
 }
 
 STABLE_TORCH_LIBRARY_IMPL(torchdtw, CUDA, m) {
