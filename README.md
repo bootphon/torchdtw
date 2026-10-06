@@ -100,6 +100,19 @@ loop, amortizing dispatch, allocation, and launch overhead across the whole batc
 Check [this folder](https://github.com/mxmpl/torchdtw/tree/main/benchmark) for comparisons
 against reference implementations.
 
+## ROCm backend
+
+The published wheels do not include a ROCm backend. To get one, build from source
+on Linux in an environment with a ROCm build of PyTorch, setting the AMD GPU
+architectures you target:
+
+```bash
+PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx1100" pip install --no-build-isolation torchdtw
+```
+
+The ROCm backend is built from the same CUDA kernel and gives the same results and
+error checks as the CUDA backend.
+
 ## Citation
 
 Please cite the fastabx paper if you use this package in your work:

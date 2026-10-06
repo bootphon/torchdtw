@@ -11,3 +11,4 @@ __pycache__
 .python-version
 *.so
 .vscode
+src/torchdtw/csrc/hip

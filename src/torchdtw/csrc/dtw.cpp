@@ -121,7 +121,7 @@ Tensor dtw_cpu(const Tensor& distances) {
   const int64_t N = distances.size(0);
   const int64_t M = distances.size(1);
   STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
-  Tensor out = torch::stable::new_empty(distances, {});
+  Tensor out = torch::stable::new_empty(distances, torch::headeronly::IntHeaderOnlyArrayRef());
   THO_DISPATCH_V2(
       distances.scalar_type(),
       "compute_dtw",
