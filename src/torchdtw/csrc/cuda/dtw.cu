@@ -23,17 +23,27 @@
 
 extern "C" AOTITorchError aoti_torch_get_current_cuda_stream(int32_t device_index, void** ret_stream);
 
-/* Creates a dummy empty _C_cuda module, imported from Python only when
-   PyTorch is built with CUDA. Keeping it separate from _C lets CPU-only and
-   ROCm builds of PyTorch load _C without libtorch_cuda or cudart. */
-PyMODINIT_FUNC PyInit__C_cuda(void) {
+#ifdef USE_ROCM
+#define TORCHDTW_MODULE_NAME "_C_rocm"
+#define TORCHDTW_MODULE_INIT PyInit__C_rocm
+#define TORCHDTW_WARP_SIZE 64
+#else
+#define TORCHDTW_MODULE_NAME "_C_cuda"
+#define TORCHDTW_MODULE_INIT PyInit__C_cuda
+#define TORCHDTW_WARP_SIZE 32
+#endif
+
+/* Creates a dummy empty _C_cuda (or _C_rocm) module, imported from Python only when
+   PyTorch is built with CUDA (or ROCm). Keeping it separate from _C lets CPU-only builds
+   of PyTorch load _C without libtorch_cuda, libtorch_hip or the GPU runtime. */
+PyMODINIT_FUNC TORCHDTW_MODULE_INIT(void) {
   static struct PyModuleDef module_def = {
       PyModuleDef_HEAD_INIT,
-      "_C_cuda", /* name of module */
-      NULL,      /* module documentation, may be NULL */
-      -1,        /* size of per-interpreter state of the module,
-                    or -1 if the module keeps state in global variables. */
-      NULL,      /* methods */
+      TORCHDTW_MODULE_NAME, /* name of module */
+      NULL,                 /* module documentation, may be NULL */
+      -1,                   /* size of per-interpreter state of the module,
+                               or -1 if the module keeps state in global variables. */
+      NULL,                 /* methods */
   };
   return PyModule_Create(&module_def);
 }
@@ -202,7 +212,18 @@ void dtw_batch_cuda_impl(Tensor& out, const Tensor& distances, const Tensor& sx,
   const dim3 num_blocks = symmetric ? dim3(static_cast<unsigned int>(nx * (nx - 1) / 2)) : dim3(nx, ny);
   const int64_t max_diag = max_x < max_y ? max_x : max_y;
   const int capped_diag = max_diag > 1024 ? 1024 : static_cast<int>(max_diag);
-  const int num_threads = ((capped_diag + 31) / 32) * 32 > 1024 ? 1024 : ((capped_diag + 31) / 32) * 32;
+  const int rounded_diag = ((capped_diag + TORCHDTW_WARP_SIZE - 1) / TORCHDTW_WARP_SIZE) * TORCHDTW_WARP_SIZE;
+  const int num_threads = rounded_diag > 1024 ? 1024 : rounded_diag;
+#ifdef USE_ROCM
+  constexpr int64_t max_grid_threads = 4294967295; // 2^32 - 1
+  STD_TORCH_CHECK(
+      static_cast<int64_t>(num_blocks.x) * num_threads <= max_grid_threads,
+      "dtw_batch too large: the number of threads exceeds the HIP grid limit of 2^32-1, got ",
+      static_cast<int64_t>(num_blocks.x),
+      " blocks of ",
+      num_threads,
+      " threads");
+#endif
   const bool needs_64bit = nx * ny * max_x * max_y > std::numeric_limits<int32_t>::max();
   using acc_t = torchdtw::acc_t<distances_t>;
   const size_t cost_bytes = (3 * static_cast<size_t>(max_y) * sizeof(acc_t) + 1) & ~static_cast<size_t>(1);

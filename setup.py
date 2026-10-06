@@ -4,7 +4,7 @@ import os
 import sys
 
 from setuptools import Extension, setup
-from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CppExtension, CUDAExtension
+from torch.utils.cpp_extension import CUDA_HOME, IS_HIP_EXTENSION, BuildExtension, CppExtension, CUDAExtension
 
 
 def get_flags() -> tuple[list[str], list[str]]:
@@ -30,15 +30,29 @@ class CUDAArchListError(RuntimeError):
         )
 
 
-def get_extensions() -> list[Extension]:
-    """Return the CPU extension, plus the CUDA extension if CUDA is found.
+class ROCmArchListError(RuntimeError):
+    """To raise if PyTorch is built with ROCm and PYTORCH_ROCM_ARCH is not set."""
 
-    The CUDA kernels live in a separate shared object so that the CPU one does not link against
-    libtorch_cuda or the CUDA runtime, and can be loaded with CPU-only or ROCm builds of PyTorch.
+    def __init__(self) -> None:
+        super().__init__(
+            "You must explicitly set PYTORCH_ROCM_ARCH to build from source with a ROCm build of PyTorch.\n"
+            "Check you supported gpu architectures beforehand.\n"
+            "For example: PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx1100'"
+        )
+
+
+def get_extensions() -> list[Extension]:
+    """Return the CPU extension, plus the CUDA or ROCm extension if a GPU toolkit is found.
+
+    The GPU kernels live in a separate shared object so that the CPU one does not link against
+    libtorch_cuda, libtorch_hip or the GPU runtime, and can be loaded with CPU-only builds of PyTorch.
     """
-    use_cuda = CUDA_HOME is not None and sys.platform != "win32"
+    use_rocm = IS_HIP_EXTENSION and sys.platform == "linux"
+    use_cuda = not use_rocm and CUDA_HOME is not None and sys.platform != "win32"
     if use_cuda and "TORCH_CUDA_ARCH_LIST" not in os.environ:
         raise CUDAArchListError
+    if use_rocm and "PYTORCH_ROCM_ARCH" not in os.environ:
+        raise ROCmArchListError
     compiler_flags, linker_flags = get_flags()
     extra_compile_args = {
         "cxx": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-DTORCH_STABLE_ONLY", *compiler_flags],
@@ -65,6 +79,15 @@ def get_extensions() -> list[Extension]:
         # making the wheel compatible across CUDA major versions.
         cuda_extension.libraries = [lib for lib in cuda_extension.libraries if "cudart" not in lib]
         extensions.append(cuda_extension)
+    if use_rocm:
+        extensions.append(
+            CUDAExtension(
+                "torchdtw._C_rocm",
+                ["src/torchdtw/csrc/cuda/dtw.cu"],
+                extra_compile_args=extra_compile_args,
+                py_limited_api=True,
+            )
+        )
     return extensions
 
 
