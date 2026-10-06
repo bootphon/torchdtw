@@ -80,14 +80,16 @@ def get_extensions() -> list[Extension]:
         cuda_extension.libraries = [lib for lib in cuda_extension.libraries if "cudart" not in lib]
         extensions.append(cuda_extension)
     if use_rocm:
-        extensions.append(
-            CUDAExtension(
-                "torchdtw._C_rocm",
-                ["src/torchdtw/csrc/cuda/dtw.cu"],
-                extra_compile_args=extra_compile_args,
-                py_limited_api=True,
-            )
+        rocm_extension = CUDAExtension(
+            "torchdtw._C_rocm",
+            ["src/torchdtw/csrc/cuda/dtw.cu"],
+            extra_compile_args=extra_compile_args,
+            py_limited_api=True,
         )
+        # Same as cudart above: HIP runtime symbols are resolved from the libamdhip64 already
+        # loaded by PyTorch, whose soname (libamdhip64.so.6, .so.7, ...) depends on its ROCm version.
+        rocm_extension.libraries = [lib for lib in rocm_extension.libraries if "amdhip64" not in lib]
+        extensions.append(rocm_extension)
     return extensions
 
 
