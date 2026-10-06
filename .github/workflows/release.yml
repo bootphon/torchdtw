@@ -83,6 +83,14 @@ jobs:
           uvx --with patchelf auditwheel repair ./dist/*abi3-linux*.whl -w ./dist --plat manylinux_2_34_x86_64 --exclude "libtorch*" --exclude "libc10*" --exclude "libcu*"
           rm ./dist/*abi3-linux*.whl
 
+      - name: Check the CUDA extension is in the Linux wheel
+        if: runner.os == 'Linux'
+        run: |
+          if ! unzip -l ./dist/*manylinux*.whl | grep -q "torchdtw/_C_cuda.abi3.so"; then
+            echo "::error::torchdtw/_C_cuda.abi3.so is missing from the Linux wheel"
+            exit 1
+          fi
+
       - name: Upload artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
