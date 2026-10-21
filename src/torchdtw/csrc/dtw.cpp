@@ -1,12 +1,11 @@
 #include <Python.h>
+
+#include "common.h"
 #include <algorithm>
 #include <cmath>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
-#include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/Dispatch_v2.h>
-#include <torch/headeronly/core/ScalarType.h>
-#include <torch/headeronly/core/TensorAccessor.h>
 #include <torch/headeronly/util/Exception.h>
 #include <type_traits>
 #include <vector>
@@ -32,36 +31,30 @@ PyMODINIT_FUNC PyInit__C(void) {
 
 namespace torchdtw {
 
-using torch::stable::Tensor;
-template <typename T, size_t N> using TensorAccessor = torch::headeronly::HeaderOnlyTensorAccessor<T, N>;
-template <typename T, size_t N> inline TensorAccessor<T, N> accessor(Tensor t) {
-  return TensorAccessor<T, N>(reinterpret_cast<T*>(t.data_ptr()), t.sizes().data(), t.strides().data());
-}
+// Accumulated DTW cost of each cell: its distance plus the minimum cost among its parents. The inner cell is
+// branchless, and the strides are held as plain values so that the compiler can specialize fill_grid's inner
+// loop for contiguous rows.
+template <typename scalar_t> struct HardCell {
+  using acc = acc_t<scalar_t>;
+  const scalar_t* data;
+  int64_t stride_i;
+  int64_t stride_j;
 
-template <typename scalar_t>
-using acc_t = std::conditional_t<
-    std::is_same_v<scalar_t, torch::headeronly::Half> || std::is_same_v<scalar_t, torch::headeronly::BFloat16>, float,
-    scalar_t>;
+  explicit HardCell(const TensorAccessor<const scalar_t, 2>& distances)
+      : data(distances.data()), stride_i(distances.stride(0)), stride_j(distances.stride(1)) {}
+
+  acc distance(int64_t i, int64_t j) const { return static_cast<acc>(data[i * stride_i + j * stride_j]); }
+  acc origin() const { return distance(0, 0); }
+  acc edge(int64_t i, int64_t j, acc parent) const { return distance(i, j) + parent; }
+  acc inner(int64_t i, int64_t j, acc diag, acc left, acc up) const {
+    return distance(i, j) + std::min({up, diag, left});
+  }
+};
 
 template <typename scalar_t>
 static void
 compute_dtw_cost(const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M, acc_t<scalar_t>* cost) {
-  using acc = acc_t<scalar_t>;
-  cost[0] = static_cast<acc>(distances_a[0][0]);
-  for (int64_t i = 1; i < N; i++) {
-    cost[i * M] = static_cast<acc>(distances_a[i][0]) + cost[(i - 1) * M];
-  }
-  for (int64_t j = 1; j < M; j++) {
-    cost[j] = static_cast<acc>(distances_a[0][j]) + cost[j - 1];
-  }
-  for (int64_t i = 1; i < N; i++) {
-    const auto distances_i = distances_a[i];
-    acc* row = cost + i * M;
-    const acc* prev = row - M;
-    for (int64_t j = 1; j < M; j++) {
-      row[j] = static_cast<acc>(distances_i[j]) + std::min({prev[j], prev[j - 1], row[j - 1]});
-    }
-  }
+  fill_grid(HardCell<scalar_t>(distances_a), N, M, cost, M);
 }
 
 template <typename cost_t>

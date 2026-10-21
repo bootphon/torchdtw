@@ -58,10 +58,12 @@ def get_extensions() -> list[Extension]:
         "cxx": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-DTORCH_STABLE_ONLY", *compiler_flags],
         "nvcc": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-O3"],
     }
+    gpu_depends = ["src/torchdtw/csrc/common.h", "src/torchdtw/csrc/cuda/common.cuh"]
     extensions = [
         CppExtension(
             "torchdtw._C",
             ["src/torchdtw/csrc/dtw.cpp"],
+            depends=["src/torchdtw/csrc/common.h"],
             extra_compile_args=extra_compile_args,
             extra_link_args=linker_flags,
             py_limited_api=True,
@@ -71,6 +73,7 @@ def get_extensions() -> list[Extension]:
         cuda_extension = CUDAExtension(
             "torchdtw._C_cuda",
             ["src/torchdtw/csrc/cuda/dtw.cu"],
+            depends=gpu_depends,
             extra_compile_args=extra_compile_args,
             py_limited_api=True,
         )
@@ -83,6 +86,7 @@ def get_extensions() -> list[Extension]:
         rocm_extension = CUDAExtension(
             "torchdtw._C_rocm",
             ["src/torchdtw/csrc/cuda/dtw.cu"],
+            depends=gpu_depends,
             extra_compile_args=extra_compile_args,
             py_limited_api=True,
         )
