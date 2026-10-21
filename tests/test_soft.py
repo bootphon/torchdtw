@@ -13,8 +13,9 @@ from .reference import brute_force_soft_dtw, reference_cost, reference_in_band, 
 GAMMAS = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
 # (n, m, bandwidth): square and rectangular, with and without the band.
 SHAPES = [(5, 7, -1), (8, 6, 3), (4, 8, 0), (8, 4, 1), (7, 4, 2), (3, 10, 1), (1, 5, -1), (5, 1, 0), (1, 1, -1)]
-# Largest distances.size(-1) fitting three diagonals of the accumulation dtype in 48 KiB of shared memory.
-CAPACITY = {torch.float64: 2048, torch.float32: 4096, torch.float16: 4096, torch.bfloat16: 4096}
+SHARED_BYTES = 49152
+# Size of the accumulator of each dtype: float for half/bfloat16.
+ACC_SIZE = {torch.float64: 8, torch.float32: 4, torch.float16: 4, torch.bfloat16: 4}
 HALF_DTYPES = [torch.float16, torch.bfloat16]
 
 
@@ -296,18 +297,39 @@ def test_cpu_cuda_parity_reduced_precision(dtype: torch.dtype) -> None:
     torch.testing.assert_close(d_cuda.grad.cpu(), d_cpu.grad)
 
 
-@pytest.mark.requires_gpu
-@pytest.mark.parametrize(("dtype", "capacity"), list(CAPACITY.items()))
-def test_shared_memory_boundary(dtype: torch.dtype, capacity: int) -> None:
-    """distances.size(-1) == capacity runs on CUDA like on CPU, capacity + 1 is rejected."""
-    (d_cpu,), (d_cuda,) = cpu_and_cuda(torch.rand(1, 3, capacity).to(dtype))
-    cost_cpu, cost_cuda = soft_dtw(d_cpu, gamma=10.0), soft_dtw(d_cuda, gamma=10.0)
+def check_cpu_cuda_parity(d: torch.Tensor, sx: torch.Tensor | None = None, gamma: float = 10.0) -> None:
+    """soft_dtw on CUDA matches CPU, forward and backward."""
+    (d_cpu, sx_cpu), (d_cuda, sx_cuda) = cpu_and_cuda(d, sx)
+    cost_cpu, cost_cuda = soft_dtw(d_cpu, sx_cpu, gamma=gamma), soft_dtw(d_cuda, sx_cuda, gamma=gamma)
     torch.testing.assert_close(cost_cuda.cpu(), cost_cpu)
     cost_cpu.sum().backward()
     cost_cuda.sum().backward()
     torch.testing.assert_close(d_cuda.grad.cpu(), d_cpu.grad)
-    with pytest.raises(RuntimeError, match="shared memory"):
-        soft_dtw(torch.rand(1, 3, capacity + 1, device="cuda").to(dtype))
+
+
+@pytest.mark.requires_gpu
+@pytest.mark.parametrize("dtype", list(ACC_SIZE))
+def test_shared_memory_boundary(dtype: torch.dtype) -> None:
+    """Both sides of the shared-memory limit match CPU: the widest size(-1) in shared memory, then in global memory.
+
+    Each block holds 3 diagonals of the accumulator type, of length distances.size(-1).
+    """
+    cap = SHARED_BYTES // (3 * ACC_SIZE[dtype])
+    for m in (cap, cap + 1, 2 * cap):
+        check_cpu_cuda_parity(torch.rand(2, 3, m).to(dtype), torch.tensor([3, 2]))
+
+
+@pytest.mark.requires_gpu
+def test_global_memory_chunks() -> None:
+    """Enough pairs in global memory to need several launches within the scratch budget match CPU.
+
+    With float64 and size(-1) == 2049, just beyond shared memory, a block needs 49184 bytes of scratch, so 256 MiB
+    fit 5457 blocks.
+    """
+    m = SHARED_BYTES // 24 + 1
+    g = torch.Generator().manual_seed(0)
+    d = torch.rand(6000, 2, m, dtype=torch.float64, generator=g)
+    check_cpu_cuda_parity(d, torch.randint(1, 3, (6000,), generator=g), gamma=1.0)
 
 
 @pytest.mark.requires_gpu

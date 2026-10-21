@@ -154,6 +154,13 @@ loop, amortizing dispatch, allocation, and launch overhead across the whole batc
 The same holds for `soft_dtw` (B independent pairs) and `soft_dtw_batch` (all pairs
 between two batches).
 
+On CUDA, each pair is computed by one block, which keeps three anti-diagonals of the
+dynamic program in shared memory when they fit: when `distances.size(-1)` is at most 2730
+for `dtw` and `dtw_batch` in float32, float16 and bfloat16 (1638 in float64), and 4096 for
+soft-DTW (2048 in float64).
+Beyond, they are kept in global memory, with no limit on the sequence lengths other than
+`s1 + s2 - 1 <= 65535` for `dtw` and `dtw_batch`.
+
 The forward pass of soft-DTW only keeps the matrix its backward pass needs, of the
 size of `distances`, when `distances` requires grad. Under `torch.no_grad()`, or for
 inputs that do not require grad, it uses no memory beyond its output.
@@ -169,8 +176,6 @@ cost = soft_dtw(torch.cdist(x, y) ** 2, sx, sy, gamma=0.1)
 loss = (cost / (sx + sy - 1)).mean()
 ```
 
-On CUDA, the size of the last dimension of `distances` is limited by the shared memory
-of a block: up to 4096 for float32, float16 and bfloat16, and up to 2048 for float64.
 The soft-DTW kernels started as [torchsoftdtw](https://github.com/angelo-ortiz/torchsoftdtw),
 which builds on ideas from [pytorch-softdtw-cuda](https://github.com/Maghoumi/pytorch-softdtw-cuda)
 and [sdtw-cuda-torch](https://github.com/BGU-CS-VIL/sdtw-cuda-torch).

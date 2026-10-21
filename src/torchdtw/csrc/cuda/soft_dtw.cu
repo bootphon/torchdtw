@@ -121,14 +121,14 @@ __device__ __forceinline__ void fill_padding(T* block, index_t s1, index_t s2, i
   }
 }
 
-// One block per pair (x, y), see as_all_pairs.
-template <typename scalar_t, typename sx_t, typename index_t>
+// One block per pair (x, y), see as_all_pairs, the launch covering rows [x0, x0 + gridDim.x) (see launch_wavefront).
+template <typename scalar_t, typename sx_t, typename index_t, bool global>
 __global__ void soft_dtw_kernel(
     PackedTensorAccessor32<scalar_t, 2> out, acc_t<scalar_t>* R,
     const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths<sx_t> sx, const Lengths<sx_t> sy,
-    bool paired, acc_t<scalar_t> gamma, int64_t bandwidth) {
+    bool paired, acc_t<scalar_t> gamma, int64_t bandwidth, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
   using acc_t = torchdtw::acc_t<scalar_t>;
-  const int32_t x = blockIdx.x;
+  const int32_t x = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
   const int32_t y = blockIdx.y;
   const int32_t N = max(static_cast<int32_t>(sx[x]), 0);
   const int32_t M = max(static_cast<int32_t>(sy[paired ? x : y]), 0);
@@ -144,7 +144,7 @@ __global__ void soft_dtw_kernel(
     return;
   }
 
-  extern __shared__ unsigned char smem[];
+  unsigned char* const smem = block_diagonals<global>(scratch, scratch_stride);
   const int32_t buf_len = static_cast<int32_t>(ld);
   acc_t* const r_smem = reinterpret_cast<acc_t*>(smem);
   const auto distances_xy = distances[x][y];
@@ -165,13 +165,13 @@ __global__ void soft_dtw_kernel(
     out[x][y] = static_cast<scalar_t>(cell.r_alpha[M - 1]);
 }
 
-template <typename scalar_t, typename sx_t, typename index_t>
+template <typename scalar_t, typename sx_t, typename index_t, bool global>
 __global__ void soft_dtw_backward_kernel(
     scalar_t* grad_distances, const PackedTensorAccessor32<scalar_t, 2> grad, const acc_t<scalar_t>* R,
     const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths<sx_t> sx, const Lengths<sx_t> sy,
-    bool paired, acc_t<scalar_t> inv_gamma) {
+    bool paired, acc_t<scalar_t> inv_gamma, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
   using acc_t = torchdtw::acc_t<scalar_t>;
-  const int32_t x = blockIdx.x;
+  const int32_t x = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
   const int32_t y = blockIdx.y;
   const int32_t N = max(static_cast<int32_t>(sx[x]), 0);
   const int32_t M = max(static_cast<int32_t>(sy[paired ? x : y]), 0);
@@ -185,7 +185,7 @@ __global__ void soft_dtw_backward_kernel(
   if (N == 0 || M == 0)
     return;
 
-  extern __shared__ unsigned char smem[];
+  unsigned char* const smem = block_diagonals<global>(scratch, scratch_stride);
   const int32_t buf_len = static_cast<int32_t>(ld);
   acc_t* const e_smem = reinterpret_cast<acc_t*>(smem);
   const auto distances_xy = distances[x][y];
@@ -204,11 +204,11 @@ __global__ void soft_dtw_backward_kernel(
 }
 
 // Launch configuration shared by the forward and backward kernels: one block per pair, holding three diagonals of
-// acc_t, of length distances.size(-1), in shared memory.
+// acc_t, of length distances.size(-1).
 struct SoftLaunch {
   dim3 num_blocks;
   int num_threads;
-  size_t smem_size;
+  size_t diagonal_bytes;
   bool needs_64bit;
 };
 
@@ -221,16 +221,10 @@ template <typename acc_t> SoftLaunch soft_dtw_launch(const Tensor& pairs) {
   constexpr int64_t max_grid_y = 65535;
   STD_TORCH_CHECK(n1 <= max_grid_x, "distances.size(0) exceeds the CUDA grid limit of 2^31-1");
   STD_TORCH_CHECK(n2 <= max_grid_y, "distances.size(1) exceeds the CUDA grid limit of 65535");
-  const size_t smem_size = 3 * static_cast<size_t>(s2) * sizeof(acc_t);
-  STD_TORCH_CHECK(
-      smem_size <= MAX_SHARED_BYTES,
-      "distances.size(-1) > ",
-      MAX_SHARED_BYTES / (3 * sizeof(acc_t)),
-      ": too large to use CUDA shared memory for this dtype");
   const dim3 num_blocks(static_cast<unsigned int>(n1), static_cast<unsigned int>(n2));
   return {num_blocks,
           wavefront_threads(s1, s2, num_blocks.x),
-          smem_size,
+          3 * static_cast<size_t>(s2) * sizeof(acc_t),
           n1 * n2 * s1 * s2 > std::numeric_limits<int32_t>::max()};
 }
 
@@ -243,29 +237,40 @@ void soft_dtw_cuda_impl(
   const Lengths<sx_t> sx_l = make_lengths<sx_t>(sx, pairs.size(2));
   const Lengths<sx_t> sy_l = make_lengths<sx_t>(sy, pairs.size(3));
   acc_t* const R_data = keep_R ? reinterpret_cast<acc_t*>(R.data_ptr()) : nullptr;
+  const DiagonalStorage storage = plan_diagonals(launch.diagonal_bytes);
   const cudaStream_t stream = current_stream();
-  if (launch.needs_64bit) {
-    soft_dtw_kernel<distances_t, sx_t, int64_t><<<launch.num_blocks, launch.num_threads, launch.smem_size, stream>>>(
-        packed_accessor32<distances_t, 2>(out),
-        R_data,
-        packed_accessor64<distances_t, 4>(pairs),
-        sx_l,
-        sy_l,
-        paired,
-        static_cast<acc_t>(gamma),
-        bandwidth);
-  } else {
-    soft_dtw_kernel<distances_t, sx_t, int32_t><<<launch.num_blocks, launch.num_threads, launch.smem_size, stream>>>(
-        packed_accessor32<distances_t, 2>(out),
-        R_data,
-        packed_accessor32<distances_t, 4>(pairs),
-        sx_l,
-        sy_l,
-        paired,
-        static_cast<acc_t>(gamma),
-        bandwidth);
-  }
-  check_launch("soft_dtw_kernel");
+  launch_wavefront(
+      pairs, storage, launch.num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
+        constexpr bool kGlobal = decltype(global)::value;
+        if (launch.needs_64bit) {
+          soft_dtw_kernel<distances_t, sx_t, int64_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
+              packed_accessor32<distances_t, 2>(out),
+              R_data,
+              packed_accessor64<distances_t, 4>(pairs),
+              sx_l,
+              sy_l,
+              paired,
+              static_cast<acc_t>(gamma),
+              bandwidth,
+              scratch,
+              storage.scratch_stride,
+              x0);
+        } else {
+          soft_dtw_kernel<distances_t, sx_t, int32_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
+              packed_accessor32<distances_t, 2>(out),
+              R_data,
+              packed_accessor32<distances_t, 4>(pairs),
+              sx_l,
+              sy_l,
+              paired,
+              static_cast<acc_t>(gamma),
+              bandwidth,
+              scratch,
+              storage.scratch_stride,
+              x0);
+        }
+        check_launch("soft_dtw_kernel");
+      });
 }
 
 template <typename distances_t, typename sx_t>
@@ -279,31 +284,40 @@ void soft_dtw_backward_cuda_impl(
   distances_t* const out = reinterpret_cast<distances_t*>(grad_distances.data_ptr());
   const acc_t* const R_data = reinterpret_cast<const acc_t*>(R.data_ptr());
   const acc_t inv_gamma = static_cast<acc_t>(1) / static_cast<acc_t>(gamma);
+  const DiagonalStorage storage = plan_diagonals(launch.diagonal_bytes);
   const cudaStream_t stream = current_stream();
-  if (launch.needs_64bit) {
-    soft_dtw_backward_kernel<distances_t, sx_t, int64_t>
-        <<<launch.num_blocks, launch.num_threads, launch.smem_size, stream>>>(
-            out,
-            packed_accessor32<distances_t, 2>(grad),
-            R_data,
-            packed_accessor64<distances_t, 4>(pairs),
-            sx_l,
-            sy_l,
-            paired,
-            inv_gamma);
-  } else {
-    soft_dtw_backward_kernel<distances_t, sx_t, int32_t>
-        <<<launch.num_blocks, launch.num_threads, launch.smem_size, stream>>>(
-            out,
-            packed_accessor32<distances_t, 2>(grad),
-            R_data,
-            packed_accessor32<distances_t, 4>(pairs),
-            sx_l,
-            sy_l,
-            paired,
-            inv_gamma);
-  }
-  check_launch("soft_dtw_backward_kernel");
+  launch_wavefront(
+      pairs, storage, launch.num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
+        constexpr bool kGlobal = decltype(global)::value;
+        if (launch.needs_64bit) {
+          soft_dtw_backward_kernel<distances_t, sx_t, int64_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
+              out,
+              packed_accessor32<distances_t, 2>(grad),
+              R_data,
+              packed_accessor64<distances_t, 4>(pairs),
+              sx_l,
+              sy_l,
+              paired,
+              inv_gamma,
+              scratch,
+              storage.scratch_stride,
+              x0);
+        } else {
+          soft_dtw_backward_kernel<distances_t, sx_t, int32_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
+              out,
+              packed_accessor32<distances_t, 2>(grad),
+              R_data,
+              packed_accessor32<distances_t, 4>(pairs),
+              sx_l,
+              sy_l,
+              paired,
+              inv_gamma,
+              scratch,
+              storage.scratch_stride,
+              x0);
+        }
+        check_launch("soft_dtw_backward_kernel");
+      });
 }
 
 std::tuple<Tensor, Tensor> soft_dtw_cuda(
