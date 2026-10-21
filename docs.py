@@ -33,9 +33,10 @@ def generate_docs(search_path: str) -> str:
         "show_root_full_path": False,
         "show_root_members_full_path": False,
         "show_object_full_path": False,
+        "show_if_no_docstring": False,
     }
     md = griffe2md.render_object_docs(package, config)
-    md = re.sub(r"^## .+", "## Usage\n\nThis package provides three functions:", md, count=1)
+    md = re.sub(r"^## .+", "## Usage\n\nThis package provides:", md, count=1)
     return re.sub(r"\[([^\]]+)\]\(#[^)]+\)", r"\1", md)
 
 

@@ -20,6 +20,18 @@ Run with:
 python -m dtw_benchmark run
 ```
 
+Soft-DTW is benchmarked separately, forward and backward, against
+[pytorch-softdtw-cuda](https://github.com/Maghoumi/pytorch-softdtw-cuda) (vendored in
+`soft/soft_dtw_cuda.py`, with its MIT license) and, when it is installed,
+[sdtw-cuda-torch](https://github.com/BGU-CS-VIL/sdtw-cuda-torch). Only torchdtw takes per-sequence
+lengths, so the other implementations are called once per pair whenever the lengths of a batch are
+uneven. pytorch-softdtw-cuda runs on CUDA only if Numba supports it in your environment.
+```bash
+python -m dtw_benchmark soft
+```
+Pass `--forward-only` to time the forward pass only, and `--output README.md` to inject the results
+into the soft-DTW markers below.
+
 Pass `--output README.md` to inject the results into the benchmark markers below, and
 `--min-run-time` to control how long each measurement runs. Use `python -m dtw_benchmark compare`
 to instead compare the current checkout against the latest released torchdtw.
@@ -73,3 +85,6 @@ Times are in microseconds (us).
 Times are in microseconds (us).
 ```
 <!-- /benchmark -->
+
+<!-- benchmark-soft -->
+<!-- /benchmark-soft -->

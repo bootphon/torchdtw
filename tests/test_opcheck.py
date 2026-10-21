@@ -3,6 +3,7 @@
 import pytest
 import torch
 from hypothesis import given
+from hypothesis import strategies as st
 from torch.library import opcheck
 
 import torchdtw  # noqa: F401 # Need to import it to register dtw operation
@@ -65,3 +66,27 @@ def test_opcheck_dtw_batch_not_symmetric_cuda(
     sx = make_tensor((n,), dtype=torch.long, low=1, high=x)
     sy = make_tensor((m,), dtype=torch.long, low=1, high=y)
     opcheck(torch.ops.torchdtw.dtw_batch.default, (sample.cuda(), sx.cuda(), sy.cuda()), {"symmetric": False})
+
+
+SOFT_DIM = st.integers(1, 64)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@given(n=BATCH, x=SOFT_DIM, y=SOFT_DIM, low=LOW, high_minus_low=HIGH_MINUS_LOW)
+def test_opcheck_soft_dtw(device: str, n: int, x: int, y: int, low: float, high_minus_low: float) -> None:
+    """Verify that soft_dtw, and its backward, can be torch compiled."""
+    sample = make_tensor((n, x, y), dtype=torch.float64, low=low, high=high_minus_low + low, device=device)
+    sx = make_tensor((n,), dtype=torch.long, low=1, high=x, device=device)
+    for keep_r in (False, True):
+        opcheck(torch.ops.torchdtw.soft_dtw.default, (sample.requires_grad_(keep_r), sx, None, 1.0, 2, keep_r))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@given(n=BATCH, m=BATCH, x=SOFT_DIM, y=SOFT_DIM, low=LOW, high_minus_low=HIGH_MINUS_LOW)
+def test_opcheck_soft_dtw_batch(
+    device: str, n: int, m: int, x: int, y: int, low: float, high_minus_low: float
+) -> None:
+    """Verify that soft_dtw on all pairs, and its backward, can be torch compiled."""
+    sample = make_tensor((n, m, x, y), dtype=torch.float64, low=low, high=high_minus_low + low, device=device)
+    sy = make_tensor((m,), dtype=torch.long, low=1, high=y, device=device).int()
+    opcheck(torch.ops.torchdtw.soft_dtw.default, (sample.requires_grad_(), None, sy, 0.5, -1, True))

@@ -54,7 +54,7 @@ inline int wavefront_threads(int64_t max_x, int64_t max_y, unsigned int num_bloc
   constexpr int64_t max_grid_threads = 4294967295; // 2^32 - 1
   STD_TORCH_CHECK(
       static_cast<int64_t>(num_blocks) * num_threads <= max_grid_threads,
-      "dtw_batch too large: the number of threads exceeds the HIP grid limit of 2^32-1, got ",
+      "Too many threads: the grid exceeds the HIP limit of 2^32-1 threads per dimension, got ",
       static_cast<int64_t>(num_blocks),
       " blocks of ",
       num_threads,

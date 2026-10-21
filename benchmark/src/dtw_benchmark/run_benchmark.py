@@ -156,9 +156,9 @@ def _render(results: list[Measurement]) -> str:
     return buffer.getvalue().strip("\n")
 
 
-def _inject(output: Path, results: list[Measurement]) -> None:
-    """Inject the rendered results between the benchmark markers of the ``output`` markdown file."""
-    begin, end = BENCHMARK_MARKERS
+def _inject(output: Path, results: list[Measurement], markers: tuple[str, str] = BENCHMARK_MARKERS) -> None:
+    """Inject the rendered results between the ``markers`` of the ``output`` markdown file."""
+    begin, end = markers
     block = f"## Benchmark results on {_device_name()}\n\n```\n{_render(results)}\n```"
     content = output.read_text(encoding="utf-8")
     pattern = re.escape(begin) + r".*?" + re.escape(end)

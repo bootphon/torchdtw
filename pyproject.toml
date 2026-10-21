@@ -51,6 +51,8 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 119
+# Vendored as is from pytorch-softdtw-cuda, for the soft-DTW benchmark.
+extend-exclude = ["benchmark/src/dtw_benchmark/soft/soft_dtw_cuda.py"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -89,8 +91,11 @@ cache-keys = [
   { file = "setup.py" },
   { file = "src/torchdtw/csrc/common.h" },
   { file = "src/torchdtw/csrc/dtw.cpp" },
+  { file = "src/torchdtw/csrc/soft_dtw.h" },
+  { file = "src/torchdtw/csrc/soft_dtw.cpp" },
   { file = "src/torchdtw/csrc/cuda/common.cuh" },
   { file = "src/torchdtw/csrc/cuda/dtw.cu" },
+  { file = "src/torchdtw/csrc/cuda/soft_dtw.cu" },
   { file = "benchmark/src/dtw_benchmark/dtw_cython.pyx" },
 ]
 

@@ -1,28 +1,19 @@
 """DTW implementation using PyTorch C++ extensions, with CPU and GPU backends."""
 
-import sys
 from importlib.util import find_spec
 
 import torch
 
 from . import _C as _C
+from ._soft import soft_dtw, soft_dtw_batch
+from ._windows import check_no_cuda_on_windows as _check_no_cuda_on_windows
 
 if torch.version.cuda is not None and find_spec(f"{__name__}._C_cuda") is not None:
     from . import _C_cuda as _C_cuda
 if torch.version.hip is not None and find_spec(f"{__name__}._C_rocm") is not None:
     from . import _C_rocm as _C_rocm
 
-__all__ = ["dtw", "dtw_batch", "dtw_path"]
-
-
-class CUDAOnWindowsError(RuntimeError):
-    def __init__(self) -> None:
-        super().__init__("torchdtw was built without CUDA support on Windows. Move your tensors to CPU first.")
-
-
-def _check_no_cuda_on_windows(tensor: torch.Tensor) -> None:
-    if sys.platform == "win32" and tensor.is_cuda:
-        raise CUDAOnWindowsError
+__all__ = ["dtw", "dtw_batch", "dtw_path", "soft_dtw", "soft_dtw_batch"]
 
 
 def dtw(distances: torch.Tensor) -> torch.Tensor:

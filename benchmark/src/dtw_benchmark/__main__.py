@@ -1,10 +1,11 @@
 """Command-line interface for the DTW benchmark.
 
-Two subcommands, each dispatching to its own logic module:
+Three subcommands, each dispatching to its own logic module:
 - ``run``: benchmark torchdtw against the other implementations (``run_benchmark``).
+- ``soft``: benchmark torchdtw's soft-DTW against the other soft-DTW implementations (``soft.run_benchmark``).
 - ``compare``: compare the current checkout against the latest released torchdtw (``compare_release``).
 
-Both modules are imported lazily so that running one subcommand does not pay for the other's imports.
+The modules are imported lazily so that running one subcommand does not pay for the others' imports.
 """
 
 import argparse
@@ -24,12 +25,13 @@ def main() -> None:
             "examples:\n"
             "  python -m dtw_benchmark run\n"
             "  python -m dtw_benchmark run --output README.md\n"
+            "  python -m dtw_benchmark soft --forward-only\n"
             "  python -m dtw_benchmark compare\n"
             "  python -m dtw_benchmark compare --wheel dist/torchdtw-1.2.3-*.whl"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{run,compare}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{run,soft,compare}")
 
     run_parser = sub.add_parser(
         "run",
@@ -52,6 +54,30 @@ def main() -> None:
         type=Path,
         metavar="FILE",
         help="Markdown file to inject the results table into, between the <!-- benchmark --> markers.",
+    )
+
+    soft_parser = sub.add_parser(
+        "soft",
+        help="Benchmark torchdtw's soft-DTW against other soft-DTW implementations",
+        description=(
+            "Benchmark torchdtw's soft_dtw against pytorch-softdtw-cuda (Maghoumi) and, when installed, "
+            "sdtw-cuda-torch, forward and backward, on batches with no, small and large spread of lengths."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    soft_parser.add_argument(
+        "--min-run-time",
+        type=float,
+        default=0.2,
+        metavar="SECONDS",
+        help="Minimum measurement time per case passed to torch's blocked_autorange (default: %(default)s).",
+    )
+    soft_parser.add_argument("--forward-only", action="store_true", help="Time the forward pass only.")
+    soft_parser.add_argument(
+        "--output",
+        type=Path,
+        metavar="FILE",
+        help="Markdown file to inject the results into, between the <!-- benchmark-soft --> markers.",
     )
 
     compare_parser = sub.add_parser(
@@ -89,6 +115,10 @@ def main() -> None:
         from .run_benchmark import benchmark  # noqa: PLC0415
 
         benchmark(args.min_run_time, args.output)
+    elif args.command == "soft":
+        from .soft import benchmark as soft_benchmark  # noqa: PLC0415
+
+        soft_benchmark(args.min_run_time, args.output, backward=not args.forward_only)
     else:
         from .compare_release import driver  # noqa: PLC0415
 
