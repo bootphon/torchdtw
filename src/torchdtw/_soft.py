@@ -24,9 +24,10 @@ def _soft_dtw(
     if distances.ndim != ndim:
         raise RankError(ndim, distances.ndim)
     check_no_cuda_on_windows(distances)
-    # Keep the accumulated cost matrix R only if the backward pass, its only reader, can run.
-    keep_r = torch.is_grad_enabled() and distances.requires_grad
-    cost, _ = torch.ops.torchdtw.soft_dtw.default(distances, sx, sy, gamma, bandwidth, keep_r)
+    if torch.is_grad_enabled() and distances.requires_grad:
+        return _SoftDTW.apply(distances, sx, sy, gamma, bandwidth)
+    # Without a backward pass, skip the autograd overhead and do not keep R, which only the backward pass reads.
+    cost, _ = torch.ops.torchdtw.soft_dtw.default(distances, sx, sy, gamma, bandwidth, keep_R=False)
     return cost
 
 
@@ -44,7 +45,7 @@ def soft_dtw(
     ``-gamma * log(sum(exp(-cost / gamma)))``, so it is differentiable with respect to ``distances``. Unlike
     ``dtw``, the cost is not normalized by the path length. Only the ``(sx[b], sy[b])`` sub-block of each pair is
     read, and the padding beyond it gets no gradient. Every ``sx[b]`` must be ``<= N`` and every ``sy[b] <= M``:
-    the CPU backend validates this, but the CUDA backend assumes it and reads out of bounds if violated.
+    the CPU backend validates this, and the CUDA backend clamps larger lengths to the padded size.
 
     :param distances: A 3D tensor of shape (B, N, M) with the pairwise distances between the frames of B pairs of
         sequences, e.g. ``torch.cdist(x, y) ** 2`` for sequences x of shape (B, N, D) and y of shape (B, M, D).
@@ -72,7 +73,7 @@ def soft_dtw_batch(
 
     Same as ``soft_dtw``, for every pair ``(i, j)`` instead of B independent pairs. Only the ``(sx[i], sy[j])``
     sub-block of each pair is read, and the padding beyond it gets no gradient. Every ``sx[i]`` must be ``<= s1``
-    and every ``sy[j] <= s2``: the CPU backend validates this, but the CUDA backend assumes it.
+    and every ``sy[j] <= s2``: the CPU backend validates this, and the CUDA backend clamps larger lengths.
 
     :param distances: A 4D tensor of shape (n1, n2, s1, s2) with the pairwise distances between the frames of two
         batches of sequences. Must have a floating dtype.
@@ -115,22 +116,30 @@ def _(
     return distances.new_empty(distances.shape)
 
 
-def _setup_context(ctx: torch.autograd.function.FunctionCtx, inputs: tuple, output: tuple) -> None:
-    distances, sx, sy, gamma, _, _ = inputs
-    _, R = output
-    ctx.mark_non_differentiable(R)
-    # R has no gradient: do not let autograd allocate and fill one with zeros.
-    ctx.set_materialize_grads(False)
-    ctx.save_for_backward(distances, R, sx, sy)
-    ctx.gamma = gamma
+class _SoftDTW(torch.autograd.Function):
+    """Differentiates soft_dtw with soft_dtw_backward.
 
+    An autograd.Function rather than torch.library.register_autograd on the op: the latter measured ~14 µs more per
+    forward and ~23 µs more per forward and backward pass, for small batches on CUDA. The raw op is thus not
+    differentiable.
+    """
 
-def _backward(ctx: torch.autograd.function.FunctionCtx, grad: torch.Tensor | None, _: torch.Tensor | None) -> tuple:
-    if grad is None:
-        return (None,) * 6
-    distances, R, sx, sy = ctx.saved_tensors
-    grad_distances = torch.ops.torchdtw.soft_dtw_backward.default(grad, distances, R, sx, sy, ctx.gamma)
-    return grad_distances, *(None,) * 5
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        distances: torch.Tensor,
+        sx: torch.Tensor | None,
+        sy: torch.Tensor | None,
+        gamma: float,
+        bandwidth: int,
+    ) -> torch.Tensor:
+        cost, R = torch.ops.torchdtw.soft_dtw.default(distances, sx, sy, gamma, bandwidth, keep_R=True)
+        ctx.save_for_backward(distances, R, sx, sy)
+        ctx.gamma = gamma
+        return cost
 
-
-torch.library.register_autograd("torchdtw::soft_dtw", _backward, setup_context=_setup_context)
+    @staticmethod
+    def backward(ctx: torch.autograd.function.FunctionCtx, grad: torch.Tensor) -> tuple:
+        distances, R, sx, sy = ctx.saved_tensors
+        grad_distances = torch.ops.torchdtw.soft_dtw_backward.default(grad, distances, R, sx, sy, ctx.gamma)
+        return grad_distances, None, None, None, None

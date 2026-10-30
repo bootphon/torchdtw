@@ -180,13 +180,36 @@ def test_reduced_precision(dtype: torch.dtype) -> None:
     assert torch.isfinite(d_low.grad).all()
 
 
-@pytest.mark.parametrize("dtype", [torch.uint8, torch.int8, torch.int16, torch.int32])
-def test_length_dtypes(dtype: torch.dtype) -> None:
-    """Lengths of any integer dtype give the same costs as int64 lengths."""
-    d = torch.rand(3, 6, 7, dtype=torch.float64)
-    sx, sy = torch.tensor([6, 2, 4]), torch.tensor([7, 7, 1])
+LENGTH_DTYPES = [torch.uint8, torch.int8, torch.int16, torch.int32, torch.uint16, torch.uint32, torch.uint64]
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("dtype", LENGTH_DTYPES)
+def test_length_dtypes(dtype: torch.dtype, device: str) -> None:
+    """Lengths of any integer dtype give the same costs and gradients as int64 lengths."""
+    d = torch.rand(3, 6, 7, dtype=torch.float64, device=device)
+    sx, sy = torch.tensor([6, 2, 4], device=device), torch.tensor([7, 7, 1], device=device)
     assert_equal(soft_dtw(d, sx.to(dtype), sy.to(dtype)), soft_dtw(d, sx, sy))
-    assert_equal(soft_dtw(d, sx.to(dtype)), soft_dtw(d, sx, torch.full((3,), 7)))
+    assert_equal(soft_dtw(d, sx.to(dtype)), soft_dtw(d, sx, torch.full((3,), 7, device=device)))
+    d4 = torch.rand(3, 2, 6, 7, dtype=torch.float64, device=device, requires_grad=True)
+    d4_ref = d4.detach().clone().requires_grad_()
+    sy2 = sy[:2]
+    soft_dtw_batch(d4, sx.to(dtype), sy2.to(dtype)).sum().backward()
+    soft_dtw_batch(d4_ref, sx, sy2).sum().backward()
+    assert_equal(d4.grad, d4_ref.grad)
+
+
+@pytest.mark.requires_gpu
+def test_cuda_clamps_lengths() -> None:
+    """On CUDA, lengths beyond the padded size are clamped to it, and negative lengths to 0, costs and gradients."""
+    d = torch.rand(2, 4, 5, dtype=torch.float64, device="cuda", requires_grad=True)
+    d_ref = d.detach().clone().requires_grad_()
+    cost = soft_dtw(d, torch.tensor([9, -3], device="cuda"), torch.tensor([5, 99], device="cuda"))
+    cost_ref = soft_dtw(d_ref, torch.tensor([4, 0], device="cuda"), torch.tensor([5, 5], device="cuda"))
+    assert_equal(cost, cost_ref)
+    cost.sum().backward()
+    cost_ref.sum().backward()
+    assert_equal(d.grad, d_ref.grad)
 
 
 def test_noncontiguous() -> None:

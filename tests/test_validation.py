@@ -82,6 +82,27 @@ def test_dtw_batch_length_exceeds_block() -> None:
         dtw_batch(d, sx, sy, symmetric=False)
 
 
+def test_dtw_batch_lengths_must_be_integers() -> None:
+    """dtw_batch rejects floating-point sx and sy."""
+    d, sx, sy = _batch()
+    with pytest.raises(RuntimeError, match="integer dtype"):
+        dtw_batch(d, sx.float(), sy.float(), symmetric=False)
+
+
+@pytest.mark.requires_gpu
+@pytest.mark.parametrize("symmetric", [False, True])
+def test_dtw_batch_cuda_clamps_lengths(symmetric: bool) -> None:  # noqa: FBT001
+    """On CUDA, lengths beyond the padded size are clamped to it, and negative lengths to 0."""
+    d = make_tensor((3, 3, 4, 4), dtype=torch.float32, low=0.0, high=1.0, device="cuda")
+    out = dtw_batch(
+        d, torch.tensor([9, -2, 3], device="cuda"), torch.tensor([9, -2, 3], device="cuda"), symmetric=symmetric
+    )
+    ref = dtw_batch(
+        d, torch.tensor([4, 0, 3], device="cuda"), torch.tensor([4, 0, 3], device="cuda"), symmetric=symmetric
+    )
+    torch.testing.assert_close(out, ref, rtol=0, atol=0)
+
+
 @pytest.mark.requires_gpu
 def test_dtw_batch_lengths_must_be_cuda() -> None:
     """On CUDA, dtw_batch requires sx/sy to also be on CUDA."""

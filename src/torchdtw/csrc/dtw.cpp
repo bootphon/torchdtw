@@ -5,7 +5,6 @@
 #include <cmath>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
-#include <torch/headeronly/core/Dispatch_v2.h>
 #include <torch/headeronly/util/Exception.h>
 #include <type_traits>
 #include <vector>
@@ -112,18 +111,12 @@ Tensor dtw_cpu(const Tensor& distances) {
   const int64_t M = distances.size(1);
   STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
   Tensor out = torch::stable::new_empty(distances, torch::headeronly::IntHeaderOnlyArrayRef());
-  THO_DISPATCH_V2(
-      distances.scalar_type(),
-      "compute_dtw",
-      AT_WRAP([&] {
-        // Reuse scratch across calls on this thread to avoid malloc/free churn for many small DTWs.
-        thread_local std::vector<acc_t<scalar_t>> workspace;
-        const scalar_t result = compute_dtw_value<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, workspace);
-        torch::stable::fill_(out, result);
-      }),
-      AT_ALL_TYPES,
-      torch::headeronly::ScalarType::Half,
-      torch::headeronly::ScalarType::BFloat16);
+  dispatch_dtw(distances.scalar_type(), [&]<typename scalar_t>() {
+    // Reuse scratch across calls on this thread to avoid malloc/free churn for many small DTWs.
+    thread_local std::vector<acc_t<scalar_t>> workspace;
+    const scalar_t result = compute_dtw_value<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, workspace);
+    torch::stable::fill_(out, result);
+  });
   return out;
 }
 
@@ -133,18 +126,12 @@ Tensor dtw_path_cpu(const Tensor& distances) {
   const int64_t M = distances.size(1);
   STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
   std::vector<std::pair<int64_t, int64_t>> path;
-  THO_DISPATCH_V2(
-      distances.scalar_type(),
-      "compute_dtw_path",
-      AT_WRAP([&] {
-        std::vector<acc_t<scalar_t>> cost(N * M);
-        compute_dtw_cost<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, cost.data());
-        path.reserve(N + M - 1);
-        trace_dtw_path(cost.data(), N, M, [&](int64_t i, int64_t j) { path.push_back({i, j}); });
-      }),
-      AT_ALL_TYPES,
-      torch::headeronly::ScalarType::Half,
-      torch::headeronly::ScalarType::BFloat16);
+  dispatch_dtw(distances.scalar_type(), [&]<typename scalar_t>() {
+    std::vector<acc_t<scalar_t>> cost(N * M);
+    compute_dtw_cost<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, cost.data());
+    path.reserve(N + M - 1);
+    trace_dtw_path(cost.data(), N, M, [&](int64_t i, int64_t j) { path.push_back({i, j}); });
+  });
   std::reverse(path.begin(), path.end());
   Tensor out = torch::stable::new_empty(distances, {(int64_t)path.size(), 2}, torch::headeronly::ScalarType::Long);
   std::memcpy(
@@ -154,23 +141,18 @@ Tensor dtw_path_cpu(const Tensor& distances) {
   return out;
 }
 
-template <typename distances_t, typename sx_t>
-void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+template <typename distances_t>
+void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Lengths sx, const Lengths sy, bool symmetric) {
   const int64_t nx = distances.size(0);
   const int64_t ny = distances.size(1);
-
-  STD_TORCH_CHECK(
-      sy.scalar_type() == torch::headeronly::CppTypeToScalarType<sx_t>::value, "sy dtype does not match sx dtype");
-  const auto sx_a = accessor<const sx_t, 1>(sx);
-  const auto sy_a = accessor<const sx_t, 1>(sy);
   const auto distances_a = accessor<const distances_t, 4>(distances);
   auto out_a = accessor<distances_t, 2>(out);
 
   for (int64_t i = 0; i < nx; i++) {
-    STD_TORCH_CHECK(static_cast<int64_t>(sx_a[i]) <= distances.size(2), "sx values must not exceed distances.size(2)");
+    STD_TORCH_CHECK(sx[i] <= distances.size(2), "sx values must not exceed distances.size(2)");
   }
   for (int64_t j = 0; j < ny; j++) {
-    STD_TORCH_CHECK(static_cast<int64_t>(sy_a[j]) <= distances.size(3), "sy values must not exceed distances.size(3)");
+    STD_TORCH_CHECK(sy[j] <= distances.size(3), "sy values must not exceed distances.size(3)");
   }
 
   if (symmetric) {
@@ -190,8 +172,8 @@ void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Tensor& sx, 
         j++;
       int64_t i = start - j * (j - 1) / 2;
       for (int64_t b = start; b < end; b++) {
-        const int64_t N = static_cast<int64_t>(sx_a[i]);
-        const int64_t M = static_cast<int64_t>(sy_a[j]);
+        const int64_t N = sx[i];
+        const int64_t M = sy[j];
         if (N > 0 && M > 0) {
           const distances_t value = compute_dtw_value<distances_t>(distances_a[i][j], N, M, workspace);
           out_a[i][j] = value;
@@ -208,9 +190,9 @@ void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Tensor& sx, 
     torch::stable::parallel_for(0, nx, 1, [&](int64_t start, int64_t end) {
       std::vector<acc_t<distances_t>> workspace;
       for (int64_t i = start; i < end; i++) {
-        const int64_t N = static_cast<int64_t>(sx_a[i]);
+        const int64_t N = sx[i];
         for (int64_t j = 0; j < ny; j++) {
-          const int64_t M = static_cast<int64_t>(sy_a[j]);
+          const int64_t M = sy[j];
           if (N <= 0 || M <= 0)
             continue;
           out_a[i][j] = compute_dtw_value<distances_t>(distances_a[i][j], N, M, workspace);
@@ -230,8 +212,12 @@ Tensor dtw_batch_cpu(const Tensor& distances, const Tensor& sx, const Tensor& sy
       !symmetric || distances.size(0) == distances.size(1),
       "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
   Tensor out = torch::stable::new_zeros(distances, {distances.size(0), distances.size(1)});
-  dispatch_dtw(distances.scalar_type(), sx.scalar_type(), [&]<typename distances_t, typename sx_t>() {
-    dtw_batch_cpu_impl<distances_t, sx_t>(out, distances, sx, sy, symmetric);
+  STD_TORCH_CHECK(
+      is_lengths_dtype(sx.scalar_type()) && is_lengths_dtype(sy.scalar_type()), "sx and sy must have an integer dtype");
+  STD_TORCH_CHECK(sy.scalar_type() == sx.scalar_type(), "sy dtype does not match sx dtype");
+  dispatch_dtw(distances.scalar_type(), [&]<typename distances_t>() {
+    dtw_batch_cpu_impl<distances_t>(
+        out, distances, make_lengths(sx, distances.size(2)), make_lengths(sy, distances.size(3)), symmetric);
   });
   return out;
 }

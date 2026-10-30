@@ -39,7 +39,7 @@ def dtw_batch(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, *, sy
 
     Only the ``(sx[i], sy[j])`` sub-block of each pair is read, so padding beyond the sequence
     lengths is ignored. Every ``sx[i]`` must be ``<= s1`` and every ``sy[j] <= s2``: the CPU backend
-    validates this, but the CUDA backend assumes it and reads out of bounds if violated. Use ``+inf``
+    validates this, and the CUDA backend clamps larger lengths to the padded size. Use ``+inf``
     to mask forbidden alignments. NaN distances are unsupported: the result is unspecified and may
     differ between the CPU and CUDA backends. Integer ``distances`` accumulate the cost in their own
     dtype and may overflow on long sequences; use a wide enough integer dtype or a floating dtype.

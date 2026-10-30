@@ -28,24 +28,12 @@ using acc_t = std::conditional_t<
 #define TORCHDTW_HOST_DEVICE
 #endif
 
-// Calls f.template operator()<distances_t, sx_t>() for the dtypes of the distances and of the lengths of dtw_batch.
-template <typename F>
-void dispatch_dtw(
-    torch::headeronly::ScalarType distances_dtype, torch::headeronly::ScalarType lengths_dtype, const F& f) {
+// Calls f.template operator()<distances_t>() for the dtype of the distances of the dtw ops.
+template <typename F> void dispatch_dtw(torch::headeronly::ScalarType distances_dtype, const F& f) {
   THO_DISPATCH_V2(
       distances_dtype,
       "dtw",
-      AT_WRAP([&] {
-        using distances_t = scalar_t;
-        THO_DISPATCH_V2(
-            lengths_dtype,
-            "dtw_lengths",
-            AT_WRAP([&] {
-              // Parenthesized, or the outer dispatch macro splits the template arguments on their comma.
-              (f.template operator()<distances_t, scalar_t>());
-            }),
-            AT_INTEGRAL_TYPES_V2);
-      }),
+      AT_WRAP([&] { f.template operator()<scalar_t>(); }),
       AT_ALL_TYPES,
       torch::headeronly::ScalarType::Half,
       torch::headeronly::ScalarType::BFloat16);
@@ -57,21 +45,59 @@ void dispatch_dtw(
 #define TORCHDTW_ALWAYS_INLINE inline __attribute__((always_inline))
 #endif
 
-// Sequence lengths, read from a 1D tensor, or all equal to `fallback` (the padded size) when it is absent.
-template <typename sx_t> struct Lengths {
-  const sx_t* data;
+// Whether sequence lengths can have this dtype: any integer dtype.
+inline bool is_lengths_dtype(torch::headeronly::ScalarType dtype) {
+  using torch::headeronly::ScalarType;
+  return dtype == ScalarType::Byte || dtype == ScalarType::Char || dtype == ScalarType::Short ||
+         dtype == ScalarType::Int || dtype == ScalarType::Long || dtype == ScalarType::UInt16 ||
+         dtype == ScalarType::UInt32 || dtype == ScalarType::UInt64;
+}
+
+// Calls f(T()) with the C++ type T of an integer dtype of sequence lengths.
+template <typename F>
+TORCHDTW_HOST_DEVICE inline int64_t visit_lengths_dtype(torch::headeronly::ScalarType dtype, F f) {
+  using torch::headeronly::ScalarType;
+  switch (dtype) {
+  case ScalarType::Byte:
+    return f(uint8_t());
+  case ScalarType::Char:
+    return f(int8_t());
+  case ScalarType::Short:
+    return f(int16_t());
+  case ScalarType::Int:
+    return f(int32_t());
+  case ScalarType::UInt16:
+    return f(uint16_t());
+  case ScalarType::UInt32:
+    return f(uint32_t());
+  case ScalarType::UInt64:
+    return f(uint64_t());
+  default:
+    return f(int64_t());
+  }
+}
+
+// Sequence lengths, read from a 1D integer tensor, or all equal to `fallback` (the padded size) when it is absent.
+// The dtype is switched on at run time instead of being a template parameter: kernels are then compiled once instead
+// of once per integer dtype, which divides the size of the binaries.
+struct Lengths {
+  const void* data;
   int64_t stride;
   int64_t fallback;
+  torch::headeronly::ScalarType dtype;
 
   TORCHDTW_HOST_DEVICE int64_t operator[](int64_t i) const {
-    return data == nullptr ? fallback : static_cast<int64_t>(data[i * stride]);
+    if (data == nullptr)
+      return fallback;
+    return visit_lengths_dtype(
+        dtype, [&](auto t) { return static_cast<int64_t>(static_cast<const decltype(t)*>(data)[i * stride]); });
   }
 };
 
-template <typename sx_t> inline Lengths<sx_t> make_lengths(const std::optional<Tensor>& t, int64_t fallback) {
+inline Lengths make_lengths(const std::optional<Tensor>& t, int64_t fallback) {
   if (!t.has_value())
-    return {nullptr, 0, fallback};
-  return {reinterpret_cast<const sx_t*>(t->data_ptr()), t->strides()[0], fallback};
+    return {nullptr, 0, fallback, torch::headeronly::ScalarType::Long};
+  return {t->data_ptr(), t->strides()[0], fallback, t->scalar_type()};
 }
 
 // Row-major DP over an N x M grid, stored in `out` with row stride `ld`. `cell` computes each cell's value:

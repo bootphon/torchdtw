@@ -121,16 +121,17 @@ __device__ __forceinline__ void fill_padding(T* block, index_t s1, index_t s2, i
 }
 
 // One block per pair (x, y), see as_all_pairs, the launch covering rows [x0, x0 + gridDim.x) (see launch_wavefront).
-template <typename scalar_t, typename sx_t, typename index_t, bool global>
+template <typename scalar_t, typename index_t, bool global>
 __global__ void soft_dtw_kernel(
     PackedTensorAccessor32<scalar_t, 2> out, acc_t<scalar_t>* R,
-    const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths<sx_t> sx, const Lengths<sx_t> sy,
-    bool paired, acc_t<scalar_t> gamma, int64_t bandwidth, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
+    const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths sx, const Lengths sy, bool paired,
+    acc_t<scalar_t> gamma, int64_t bandwidth, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
   using acc_t = torchdtw::acc_t<scalar_t>;
   const int32_t x = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
   const int32_t y = blockIdx.y;
-  const int32_t N = max(static_cast<int32_t>(sx[x]), 0);
-  const int32_t M = max(static_cast<int32_t>(sy[paired ? x : y]), 0);
+  const PairLengths lengths(sx, x, sy, paired ? x : y);
+  const int32_t N = lengths.N;
+  const int32_t M = lengths.M;
   const index_t s1 = distances.size(2);
   const index_t ld = distances.size(3);
   acc_t* const R_xy = R == nullptr ? nullptr : R + (static_cast<index_t>(x) * distances.size(1) + y) * s1 * ld;
@@ -164,16 +165,17 @@ __global__ void soft_dtw_kernel(
     out[x][y] = static_cast<scalar_t>(cell.r_alpha[M - 1]);
 }
 
-template <typename scalar_t, typename sx_t, typename index_t, bool global>
+template <typename scalar_t, typename index_t, bool global>
 __global__ void soft_dtw_backward_kernel(
     scalar_t* grad_distances, const PackedTensorAccessor32<scalar_t, 2> grad, const acc_t<scalar_t>* R,
-    const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths<sx_t> sx, const Lengths<sx_t> sy,
-    bool paired, acc_t<scalar_t> inv_gamma, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
+    const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths sx, const Lengths sy, bool paired,
+    acc_t<scalar_t> inv_gamma, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
   using acc_t = torchdtw::acc_t<scalar_t>;
   const int32_t x = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
   const int32_t y = blockIdx.y;
-  const int32_t N = max(static_cast<int32_t>(sx[x]), 0);
-  const int32_t M = max(static_cast<int32_t>(sy[paired ? x : y]), 0);
+  const PairLengths lengths(sx, x, sy, paired ? x : y);
+  const int32_t N = lengths.N;
+  const int32_t M = lengths.M;
   const index_t s1 = distances.size(2);
   const index_t ld = distances.size(3);
   const index_t offset = (static_cast<index_t>(x) * distances.size(1) + y) * s1 * ld;
@@ -223,14 +225,14 @@ template <typename acc_t> SoftLaunch soft_dtw_launch(const Tensor& pairs) {
           n1 * n2 * s1 * s2 > std::numeric_limits<int32_t>::max()};
 }
 
-template <typename distances_t, typename sx_t>
+template <typename distances_t>
 void soft_dtw_cuda_impl(
     Tensor& out, Tensor& R, bool keep_R, const Tensor& pairs, const std::optional<Tensor>& sx,
     const std::optional<Tensor>& sy, bool paired, double gamma, int64_t bandwidth) {
   using acc_t = torchdtw::acc_t<distances_t>;
   const SoftLaunch launch = soft_dtw_launch<acc_t>(pairs);
-  const Lengths<sx_t> sx_l = make_lengths<sx_t>(sx, pairs.size(2));
-  const Lengths<sx_t> sy_l = make_lengths<sx_t>(sy, pairs.size(3));
+  const Lengths sx_l = make_lengths(sx, pairs.size(2));
+  const Lengths sy_l = make_lengths(sy, pairs.size(3));
   acc_t* const R_data = keep_R ? reinterpret_cast<acc_t*>(R.data_ptr()) : nullptr;
   const DiagonalStorage storage = plan_diagonals(launch.diagonal_bytes);
   const cudaStream_t stream = current_stream();
@@ -238,7 +240,7 @@ void soft_dtw_cuda_impl(
       pairs, storage, launch.num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
         constexpr bool kGlobal = decltype(global)::value;
         dispatch_index(launch.needs_64bit, [&]<typename index_t>() {
-          soft_dtw_kernel<distances_t, sx_t, index_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
+          soft_dtw_kernel<distances_t, index_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
               packed_accessor32<distances_t, 2>(out),
               R_data,
               packed_accessor<distances_t, 4, index_t>(pairs),
@@ -255,14 +257,14 @@ void soft_dtw_cuda_impl(
       });
 }
 
-template <typename distances_t, typename sx_t>
+template <typename distances_t>
 void soft_dtw_backward_cuda_impl(
     Tensor& grad_distances, const Tensor& grad, const Tensor& pairs, const Tensor& R, const std::optional<Tensor>& sx,
     const std::optional<Tensor>& sy, bool paired, double gamma) {
   using acc_t = torchdtw::acc_t<distances_t>;
   const SoftLaunch launch = soft_dtw_launch<acc_t>(pairs);
-  const Lengths<sx_t> sx_l = make_lengths<sx_t>(sx, pairs.size(2));
-  const Lengths<sx_t> sy_l = make_lengths<sx_t>(sy, pairs.size(3));
+  const Lengths sx_l = make_lengths(sx, pairs.size(2));
+  const Lengths sy_l = make_lengths(sy, pairs.size(3));
   distances_t* const out = reinterpret_cast<distances_t*>(grad_distances.data_ptr());
   const acc_t* const R_data = reinterpret_cast<const acc_t*>(R.data_ptr());
   const acc_t inv_gamma = static_cast<acc_t>(1) / static_cast<acc_t>(gamma);
@@ -272,7 +274,7 @@ void soft_dtw_backward_cuda_impl(
       pairs, storage, launch.num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
         constexpr bool kGlobal = decltype(global)::value;
         dispatch_index(launch.needs_64bit, [&]<typename index_t>() {
-          soft_dtw_backward_kernel<distances_t, sx_t, index_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
+          soft_dtw_backward_kernel<distances_t, index_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
               out,
               packed_accessor32<distances_t, 2>(grad),
               R_data,
@@ -298,14 +300,14 @@ std::tuple<Tensor, Tensor> soft_dtw_cuda(
       sy,
       gamma,
       keep_R,
-      [&]<typename distances_t, typename sx_t>(Tensor& out, Tensor& R, const Tensor& pairs, bool paired) {
+      [&]<typename distances_t>(Tensor& out, Tensor& R, const Tensor& pairs, bool paired) {
         if (pairs.numel() == 0) {
           // No cell to compute: every pair is empty.
           torch::stable::fill_(out, 0);
           return;
         }
         const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
-        soft_dtw_cuda_impl<distances_t, sx_t>(out, R, keep_R, pairs, sx, sy, paired, gamma, bandwidth);
+        soft_dtw_cuda_impl<distances_t>(out, R, keep_R, pairs, sx, sy, paired, gamma, bandwidth);
       });
 }
 
@@ -319,8 +321,7 @@ Tensor soft_dtw_backward_cuda(
       sx,
       sy,
       gamma,
-      [&]<typename distances_t, typename sx_t>(
-          Tensor& grad_distances, const Tensor& grad_pairs, const Tensor& pairs, bool paired) {
+      [&]<typename distances_t>(Tensor& grad_distances, const Tensor& grad_pairs, const Tensor& pairs, bool paired) {
         STD_TORCH_CHECK(
             grad.is_cuda() && R.is_cuda() && grad.get_device() == distances.get_device() &&
                 R.get_device() == distances.get_device(),
@@ -328,7 +329,7 @@ Tensor soft_dtw_backward_cuda(
         if (pairs.numel() == 0)
           return;
         const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
-        soft_dtw_backward_cuda_impl<distances_t, sx_t>(grad_distances, grad_pairs, pairs, R, sx, sy, paired, gamma);
+        soft_dtw_backward_cuda_impl<distances_t>(grad_distances, grad_pairs, pairs, R, sx, sy, paired, gamma);
       });
 }
 

@@ -80,6 +80,38 @@ inline dim3 pair_grid(int64_t n1, int64_t n2) {
   return dim3(static_cast<unsigned int>(n1), static_cast<unsigned int>(n2));
 }
 
+// The lengths sx[x] and sy[y] of the pair of a block, clamped to [0, padded size]: negative lengths are empty, and
+// lengths beyond the padded size, which the CPU backend rejects, cannot make the kernels read out of bounds.
+// Both are loaded, in their own type, under a single switch on their dtype (sx and sy have the same dtype when both
+// are present), before any conversion: otherwise the conversion of the first waits for its load before the second is
+// issued, measured ~1% slower on small batches. The clamp is in int32, as the DP loops: clamped in int64, the
+// compiler lost that N, M >= 0 there, ~3% slower.
+struct PairLengths {
+  int32_t N;
+  int32_t M;
+
+  __device__ __forceinline__ PairLengths(const Lengths& sx, int64_t x, const Lengths& sy, int64_t y) {
+    int64_t m = 0;
+    const int64_t n = visit_lengths_dtype(sx.data != nullptr ? sx.dtype : sy.dtype, [&](auto t) {
+      using T = decltype(t);
+      const T* const px = static_cast<const T*>(sx.data);
+      const T* const py = static_cast<const T*>(sy.data);
+      const T a = px != nullptr ? px[x * sx.stride] : T();
+      const T b = py != nullptr ? py[y * sy.stride] : T();
+      m = py != nullptr ? static_cast<int64_t>(b) : sy.fallback;
+      return px != nullptr ? static_cast<int64_t>(a) : sx.fallback;
+    });
+    N = clamp(n, sx.fallback);
+    M = clamp(m, sy.fallback);
+  }
+
+private:
+  __device__ __forceinline__ static int32_t clamp(int64_t length, int64_t padded) {
+    const int32_t n = static_cast<int32_t>(length < padded ? length : padded);
+    return n < 0 ? 0 : n;
+  }
+};
+
 // Calls f.template operator()<index_t>() with the index type of the distances: int64_t if needs_64bit, else int32_t.
 template <typename F> void dispatch_index(bool needs_64bit, const F& f) {
   if (needs_64bit)

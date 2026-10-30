@@ -6,7 +6,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from torch.library import opcheck
 
-import torchdtw  # noqa: F401 # Need to import it to register dtw operation
+import torchdtw
 
 from .conftest import BATCH, DIM, HIGH_MINUS_LOW, LOW, make_tensor
 
@@ -74,11 +74,17 @@ SOFT_DIM = st.integers(1, 64)
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
 @given(n=BATCH, x=SOFT_DIM, y=SOFT_DIM, low=LOW, high_minus_low=HIGH_MINUS_LOW)
 def test_opcheck_soft_dtw(device: str, n: int, x: int, y: int, low: float, high_minus_low: float) -> None:
-    """Verify that soft_dtw, and its backward, can be torch compiled."""
+    """Verify that soft_dtw, and its backward, can be torch compiled.
+
+    The raw op is not differentiable (soft_dtw is differentiated by an autograd.Function), so its inputs do not
+    require grad here, and the backward op is checked on its own.
+    """
     sample = make_tensor((n, x, y), dtype=torch.float64, low=low, high=high_minus_low + low, device=device)
     sx = make_tensor((n,), dtype=torch.long, low=1, high=x, device=device)
     for keep_r in (False, True):
-        opcheck(torch.ops.torchdtw.soft_dtw.default, (sample.requires_grad_(keep_r), sx, None, 1.0, 2, keep_r))
+        opcheck(torch.ops.torchdtw.soft_dtw.default, (sample, sx, None, 1.0, 2, keep_r))
+    cost, R = torch.ops.torchdtw.soft_dtw.default(sample, sx, None, 1.0, 2, keep_R=True)
+    opcheck(torch.ops.torchdtw.soft_dtw_backward.default, (torch.rand_like(cost), sample, R, sx, None, 1.0))
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
@@ -89,4 +95,22 @@ def test_opcheck_soft_dtw_batch(
     """Verify that soft_dtw on all pairs, and its backward, can be torch compiled."""
     sample = make_tensor((n, m, x, y), dtype=torch.float64, low=low, high=high_minus_low + low, device=device)
     sy = make_tensor((m,), dtype=torch.long, low=1, high=y, device=device).int()
-    opcheck(torch.ops.torchdtw.soft_dtw.default, (sample.requires_grad_(), None, sy, 0.5, -1, True))
+    opcheck(torch.ops.torchdtw.soft_dtw.default, (sample, None, sy, 0.5, -1, True))
+    cost, R = torch.ops.torchdtw.soft_dtw.default(sample, None, sy, 0.5, -1, keep_R=True)
+    opcheck(torch.ops.torchdtw.soft_dtw_backward.default, (torch.rand_like(cost), sample, R, None, sy, 0.5))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+def test_compile_soft_dtw_autograd(device: str) -> None:
+    """soft_dtw compiles in a single graph, with the same costs and gradients as in eager mode."""
+
+    def loss(d: torch.Tensor, sx: torch.Tensor) -> torch.Tensor:
+        return torchdtw.soft_dtw(d, sx, gamma=0.5, bandwidth=2).sum()
+
+    torch.compiler.reset()
+    sx = torch.tensor([5, 3, 1], device=device)
+    d = torch.rand(3, 5, 6, dtype=torch.float64, device=device, requires_grad=True)
+    d_eager = d.detach().clone().requires_grad_()
+    torch.compile(loss, fullgraph=True)(d, sx).backward()
+    loss(d_eager, sx).backward()
+    torch.testing.assert_close(d.grad, d_eager.grad, rtol=0, atol=0)

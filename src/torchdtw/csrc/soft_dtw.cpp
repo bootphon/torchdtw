@@ -87,8 +87,7 @@ template <typename T> static void fill_padding(T* block, int64_t s1, int64_t s2,
   }
 }
 
-template <typename sx_t>
-static void check_lengths(const Lengths<sx_t>& sx, const Lengths<sx_t>& sy, const Tensor& pairs, bool paired) {
+static void check_lengths(const Lengths& sx, const Lengths& sy, const Tensor& pairs, bool paired) {
   for (int64_t x = 0; x < pairs.size(0); x++) {
     STD_TORCH_CHECK(sx[x] <= pairs.size(2), "sx values must not exceed distances.size(-2)");
   }
@@ -97,7 +96,7 @@ static void check_lengths(const Lengths<sx_t>& sx, const Lengths<sx_t>& sy, cons
   }
 }
 
-template <typename distances_t, typename sx_t>
+template <typename distances_t>
 void soft_dtw_cpu_impl(
     Tensor& out, Tensor& R, bool keep_R, const Tensor& pairs, const std::optional<Tensor>& sx_opt,
     const std::optional<Tensor>& sy_opt, bool paired, double gamma, int64_t bandwidth) {
@@ -105,8 +104,8 @@ void soft_dtw_cpu_impl(
   const int64_t n2 = pairs.size(1);
   const int64_t s1 = pairs.size(2);
   const int64_t s2 = pairs.size(3);
-  const Lengths<sx_t> sx = make_lengths<sx_t>(sx_opt, s1);
-  const Lengths<sx_t> sy = make_lengths<sx_t>(sy_opt, s2);
+  const Lengths sx = make_lengths(sx_opt, s1);
+  const Lengths sy = make_lengths(sy_opt, s2);
   check_lengths(sx, sy, pairs, paired);
   const auto distances_a = accessor<const distances_t, 4>(pairs);
   auto out_a = accessor<distances_t, 2>(out);
@@ -148,7 +147,7 @@ void soft_dtw_cpu_impl(
   });
 }
 
-template <typename distances_t, typename sx_t>
+template <typename distances_t>
 void soft_dtw_backward_cpu_impl(
     Tensor& grad_distances, const Tensor& grad, const Tensor& pairs, const Tensor& R,
     const std::optional<Tensor>& sx_opt, const std::optional<Tensor>& sy_opt, bool paired, double gamma) {
@@ -156,8 +155,8 @@ void soft_dtw_backward_cpu_impl(
   const int64_t n2 = pairs.size(1);
   const int64_t s1 = pairs.size(2);
   const int64_t s2 = pairs.size(3);
-  const Lengths<sx_t> sx = make_lengths<sx_t>(sx_opt, s1);
-  const Lengths<sx_t> sy = make_lengths<sx_t>(sy_opt, s2);
+  const Lengths sx = make_lengths(sx_opt, s1);
+  const Lengths sy = make_lengths(sy_opt, s2);
   check_lengths(sx, sy, pairs, paired);
   const auto distances_a = accessor<const distances_t, 4>(pairs);
   const auto grad_a = accessor<const distances_t, 2>(grad);
@@ -201,8 +200,8 @@ std::tuple<Tensor, Tensor> soft_dtw_cpu(
       sy,
       gamma,
       keep_R,
-      [&]<typename distances_t, typename sx_t>(Tensor& out, Tensor& R, const Tensor& pairs, bool paired) {
-        soft_dtw_cpu_impl<distances_t, sx_t>(out, R, keep_R, pairs, sx, sy, paired, gamma, bandwidth);
+      [&]<typename distances_t>(Tensor& out, Tensor& R, const Tensor& pairs, bool paired) {
+        soft_dtw_cpu_impl<distances_t>(out, R, keep_R, pairs, sx, sy, paired, gamma, bandwidth);
       });
 }
 
@@ -216,9 +215,8 @@ Tensor soft_dtw_backward_cpu(
       sx,
       sy,
       gamma,
-      [&]<typename distances_t, typename sx_t>(
-          Tensor& grad_distances, const Tensor& grad_pairs, const Tensor& pairs, bool paired) {
-        soft_dtw_backward_cpu_impl<distances_t, sx_t>(grad_distances, grad_pairs, pairs, R, sx, sy, paired, gamma);
+      [&]<typename distances_t>(Tensor& grad_distances, const Tensor& grad_pairs, const Tensor& pairs, bool paired) {
+        soft_dtw_backward_cpu_impl<distances_t>(grad_distances, grad_pairs, pairs, R, sx, sy, paired, gamma);
       });
 }
 

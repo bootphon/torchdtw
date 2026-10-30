@@ -94,8 +94,8 @@ inline torch::headeronly::ScalarType acc_scalar_type(torch::headeronly::ScalarTy
   return dtype == ScalarType::Half || dtype == ScalarType::BFloat16 ? ScalarType::Float : dtype;
 }
 
-// Checks shared by the CPU and CUDA soft_dtw ops, and the dtype to dispatch the lengths on (Long if both absent).
-inline torch::headeronly::ScalarType check_soft_dtw_inputs(
+// Checks shared by the CPU and CUDA soft_dtw ops.
+inline void check_soft_dtw_inputs(
     const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, double gamma) {
   using torch::headeronly::ScalarType;
   STD_TORCH_CHECK(
@@ -115,21 +115,13 @@ inline torch::headeronly::ScalarType check_soft_dtw_inputs(
     const Tensor& t = lengths[k]->value();
     STD_TORCH_CHECK(t.dim() == 1, "sx and sy must be 1D tensors");
     STD_TORCH_CHECK(t.size(0) == sizes[k], "sx and sy sizes must match the batch dimensions of distances");
-    const ScalarType t_dtype = t.scalar_type();
-    STD_TORCH_CHECK(
-        t_dtype == ScalarType::Byte || t_dtype == ScalarType::Char || t_dtype == ScalarType::Short ||
-            t_dtype == ScalarType::Int || t_dtype == ScalarType::Long || t_dtype == ScalarType::UInt16 ||
-            t_dtype == ScalarType::UInt32 || t_dtype == ScalarType::UInt64,
-        "sx and sy must have an integer dtype");
+    STD_TORCH_CHECK(is_lengths_dtype(t.scalar_type()), "sx and sy must have an integer dtype");
     STD_TORCH_CHECK(
         t.is_cuda() == distances.is_cuda() && t.get_device() == distances.get_device(),
         "sx and sy must be on the same device as distances");
   }
   if (sx.has_value() && sy.has_value())
     STD_TORCH_CHECK(sx->scalar_type() == sy->scalar_type(), "sx and sy dtypes do not match");
-  if (sx.has_value())
-    return sx->scalar_type();
-  return sy.has_value() ? sy->scalar_type() : ScalarType::Long;
 }
 
 // Checks of the backward op's own inputs: the gradient of the cost and the R matrix saved by the forward.
@@ -149,64 +141,52 @@ inline void check_soft_dtw_backward_inputs(const Tensor& grad, const Tensor& dis
   STD_TORCH_CHECK(grad.scalar_type() == distances.scalar_type(), "grad must have the dtype of distances");
 }
 
-// Calls f.template operator()<distances_t, sx_t>() for the dtypes of the distances and of the lengths.
-template <typename F>
-void dispatch_soft_dtw(
-    torch::headeronly::ScalarType distances_dtype, torch::headeronly::ScalarType lengths_dtype, const F& f) {
+// Calls f.template operator()<distances_t>() for the dtype of the distances of the soft_dtw ops.
+template <typename F> void dispatch_soft_dtw(torch::headeronly::ScalarType distances_dtype, const F& f) {
   THO_DISPATCH_V2(
       distances_dtype,
       "soft_dtw",
-      AT_WRAP([&] {
-        using distances_t = scalar_t;
-        THO_DISPATCH_V2(
-            lengths_dtype,
-            "soft_dtw_lengths",
-            AT_WRAP([&] {
-              // Parenthesized, or the outer dispatch macro splits the template arguments on their comma.
-              (f.template operator()<distances_t, scalar_t>());
-            }),
-            AT_INTEGRAL_TYPES_V2);
-      }),
+      AT_WRAP([&] { f.template operator()<scalar_t>(); }),
       AT_FLOATING_TYPES,
       torch::headeronly::ScalarType::Half,
       torch::headeronly::ScalarType::BFloat16);
 }
 
-// The soft_dtw op, shared by the backends: run.template operator()<distances_t, sx_t>(out, R, pairs, paired) fills
+// The soft_dtw op, shared by the backends: run.template operator()<distances_t>(out, R, pairs, paired) fills
 // the (n1, n2) costs `out`, and the R matrix when keep_R, from the distances viewed as all pairs.
 template <typename Run>
 std::tuple<Tensor, Tensor> soft_dtw_op(
     const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, double gamma,
     bool keep_R, const Run& run) {
-  const torch::headeronly::ScalarType lengths_dtype = check_soft_dtw_inputs(distances, sx, sy, gamma);
+  check_soft_dtw_inputs(distances, sx, sy, gamma);
   const bool paired = distances.dim() == 3;
   const Tensor pairs = as_all_pairs(distances);
   Tensor out = torch::stable::new_empty(distances, {pairs.size(0), pairs.size(1)});
   const auto acc_dtype = acc_scalar_type(distances.scalar_type());
   Tensor R = keep_R ? torch::stable::new_empty(distances, distances.sizes(), acc_dtype)
                     : torch::stable::new_empty(distances, {0}, acc_dtype);
-  dispatch_soft_dtw(distances.scalar_type(), lengths_dtype, [&]<typename distances_t, typename sx_t>() {
-    run.template operator()<distances_t, sx_t>(out, R, pairs, paired);
+  dispatch_soft_dtw(distances.scalar_type(), [&]<typename distances_t>() {
+    run.template operator()<distances_t>(out, R, pairs, paired);
   });
   if (paired)
     out = torch::stable::view(out, {pairs.size(0)});
   return {out, R};
 }
 
-// The soft_dtw_backward op, shared by the backends: run.template operator()<distances_t, sx_t>(grad_distances,
+// The soft_dtw_backward op, shared by the backends: run.template operator()<distances_t>(grad_distances,
 // grad_pairs, pairs, paired) fills `grad_distances`, with the gradient of the costs viewed as (n1, n2).
 template <typename Run>
 Tensor soft_dtw_backward_op(
     const Tensor& grad, const Tensor& distances, const Tensor& R, const std::optional<Tensor>& sx,
     const std::optional<Tensor>& sy, double gamma, const Run& run) {
-  const torch::headeronly::ScalarType lengths_dtype = check_soft_dtw_inputs(distances, sx, sy, gamma);
+  check_soft_dtw_inputs(distances, sx, sy, gamma);
   check_soft_dtw_backward_inputs(grad, distances, R);
   const bool paired = distances.dim() == 3;
   const Tensor pairs = as_all_pairs(distances);
   const Tensor grad_pairs = paired ? torch::stable::view(grad, {pairs.size(0), 1}) : grad;
   Tensor grad_distances = torch::stable::new_empty(distances, distances.sizes());
-  dispatch_soft_dtw(distances.scalar_type(), lengths_dtype, [&]<typename distances_t, typename sx_t>() {
-    run.template operator()<distances_t, sx_t>(grad_distances, grad_pairs, pairs, paired);
+  dispatch_soft_dtw(distances.scalar_type(), [&]<typename distances_t>() {
+    run.template operator()<distances_t>(grad_distances, grad_pairs, pairs, paired);
   });
   return grad_distances;
 }
