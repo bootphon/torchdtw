@@ -82,9 +82,9 @@ def test_opcheck_soft_dtw(device: str, n: int, x: int, y: int, low: float, high_
     sample = make_tensor((n, x, y), dtype=torch.float64, low=low, high=high_minus_low + low, device=device)
     sx = make_tensor((n,), dtype=torch.long, low=1, high=x, device=device)
     for keep_r in (False, True):
-        opcheck(torch.ops.torchdtw.soft_dtw.default, (sample, sx, None, 1.0, 2, keep_r))
-    cost, R = torch.ops.torchdtw.soft_dtw.default(sample, sx, None, 1.0, 2, keep_R=True)
-    opcheck(torch.ops.torchdtw.soft_dtw_backward.default, (torch.rand_like(cost), sample, R, sx, None, 1.0))
+        opcheck(torch.ops.torchdtw.soft_dtw.default, (sample, sx, None, 1.0, 2, False, keep_r))
+    cost, R = torch.ops.torchdtw.soft_dtw.default(sample, sx, None, 1.0, 2, symmetric=False, keep_R=True)
+    opcheck(torch.ops.torchdtw.soft_dtw_backward.default, (torch.rand_like(cost), sample, R, sx, None, 1.0, False))
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
@@ -92,12 +92,30 @@ def test_opcheck_soft_dtw(device: str, n: int, x: int, y: int, low: float, high_
 def test_opcheck_soft_dtw_batch(
     device: str, n: int, m: int, x: int, y: int, low: float, high_minus_low: float
 ) -> None:
-    """Verify that soft_dtw on all pairs, and its backward, can be torch compiled."""
-    sample = make_tensor((n, m, x, y), dtype=torch.float64, low=low, high=high_minus_low + low, device=device)
-    sy = make_tensor((m,), dtype=torch.long, low=1, high=y, device=device).int()
-    opcheck(torch.ops.torchdtw.soft_dtw.default, (sample, None, sy, 0.5, -1, True))
-    cost, R = torch.ops.torchdtw.soft_dtw.default(sample, None, sy, 0.5, -1, keep_R=True)
-    opcheck(torch.ops.torchdtw.soft_dtw_backward.default, (torch.rand_like(cost), sample, R, None, sy, 0.5))
+    """Verify that soft_dtw on all pairs, symmetric or not, and its backward, can be torch compiled."""
+    for symmetric in (False, True):
+        m = n if symmetric else m
+        sample = make_tensor((n, m, x, y), dtype=torch.float64, low=low, high=high_minus_low + low, device=device)
+        sy = make_tensor((m,), dtype=torch.long, low=1, high=y, device=device).int()
+        args = (sample, None, sy, 0.5, -1, symmetric)
+        opcheck(torch.ops.torchdtw.soft_dtw.default, (*args, True))
+        cost, R = torch.ops.torchdtw.soft_dtw.default(*args, keep_R=True)
+        opcheck(
+            torch.ops.torchdtw.soft_dtw_backward.default,
+            (torch.rand_like(cost), sample, R, None, sy, 0.5, symmetric),
+        )
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@given(n=BATCH, m=BATCH, x=DIM, y=DIM, low=LOW, high_minus_low=HIGH_MINUS_LOW)
+def test_opcheck_dtw_batch_without_lengths(
+    device: str, n: int, m: int, x: int, y: int, low: float, high_minus_low: float
+) -> None:
+    """Verify that dtw_batch without sx, or sy, can be torch compiled."""
+    sample = make_tensor((n, m, x, y), dtype=torch.float32, low=low, high=high_minus_low + low, device=device)
+    sy = make_tensor((m,), dtype=torch.long, low=1, high=y, device=device)
+    opcheck(torch.ops.torchdtw.dtw_batch.default, (sample, None, None), {"symmetric": False})
+    opcheck(torch.ops.torchdtw.dtw_batch.default, (sample, None, sy), {"symmetric": False})
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])

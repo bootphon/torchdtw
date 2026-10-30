@@ -231,13 +231,13 @@ def test_noncontiguous() -> None:
 def test_r_kept_only_for_backward() -> None:
     """The accumulated cost matrix R is only returned, and allocated, when keep_R is set."""
     d = torch.rand(2, 3, 4)
-    _, R = torch.ops.torchdtw.soft_dtw(d, None, None, 1.0, -1, False)  # noqa: FBT003
+    _, R = torch.ops.torchdtw.soft_dtw(d, None, None, 1.0, -1, symmetric=False, keep_R=False)
     assert R.shape == (0,)
-    _, R = torch.ops.torchdtw.soft_dtw(d.half(), None, None, 1.0, -1, True)  # noqa: FBT003
+    _, R = torch.ops.torchdtw.soft_dtw(d.half(), None, None, 1.0, -1, symmetric=False, keep_R=True)
     assert R.shape == d.shape
     assert R.dtype == torch.float32
     with pytest.raises(RuntimeError, match="keep_R=True"):
-        torch.ops.torchdtw.soft_dtw_backward(torch.ones(2), d, torch.empty(0), None, None, 1.0)
+        torch.ops.torchdtw.soft_dtw_backward(torch.ones(2), d, torch.empty(0), None, None, 1.0, symmetric=False)
 
 
 @pytest.mark.parametrize(
@@ -257,7 +257,83 @@ def test_r_kept_only_for_backward() -> None:
 def test_validation(args: tuple, match: str) -> None:
     """Invalid inputs are rejected with an explicit message."""
     with pytest.raises(RuntimeError, match=match):
-        torch.ops.torchdtw.soft_dtw(*args, -1, False)  # noqa: FBT003
+        torch.ops.torchdtw.soft_dtw(*args, -1, symmetric=False, keep_R=False)
+
+
+@pytest.mark.parametrize("shape", [(3, 5, 5), (2, 3, 5, 5)])
+def test_symmetric_validation(shape: tuple[int, ...]) -> None:
+    """Symmetric mode requires 4D distances between a batch and itself."""
+    with pytest.raises(RuntimeError, match="symmetric soft_dtw requires"):
+        torch.ops.torchdtw.soft_dtw(torch.rand(shape), None, None, 1.0, -1, symmetric=True, keep_R=False)
+
+
+def symmetric_batch(device: str, n: int = 5, s: int = 7) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sequences of a batch, of shape (n, s, 3) and requiring grad, and their lengths, some of them padded."""
+    g = torch.Generator().manual_seed(n * s)
+    x = torch.randn(n, s, 3, dtype=torch.float64, generator=g).to(device).requires_grad_()
+    lengths = torch.randint(1, s + 1, (n,), generator=g).to(device)
+    lengths[0] = s
+    return x, lengths
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("bandwidth", [-1, 1])
+def test_symmetric_matches_all_pairs(device: str, bandwidth: int) -> None:
+    """Symmetric mode gives the costs of all pairs, and the same gradients through the sequences."""
+    x, lengths = symmetric_batch(device)
+    x_ref = x.detach().clone().requires_grad_()
+
+    def costs(x: torch.Tensor, *, symmetric: bool) -> torch.Tensor:
+        d = torch.cdist(x[:, None], x[None]) ** 2
+        return soft_dtw_batch(d, lengths, lengths, gamma=0.5, bandwidth=bandwidth, symmetric=symmetric)
+
+    cost, cost_ref = costs(x, symmetric=True), costs(x_ref, symmetric=False)
+    torch.testing.assert_close(cost, cost_ref)
+    assert_equal(cost, cost.T)
+    weights = torch.rand_like(cost)
+    (cost * weights).sum().backward()
+    (cost_ref * weights).sum().backward()
+    torch.testing.assert_close(x.grad, x_ref.grad)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+def test_symmetric_reads_upper_blocks_only(device: str) -> None:
+    """Symmetric mode reads the blocks i <= j only: the others do not change the costs and get no gradient."""
+    d = torch.rand(4, 4, 5, 5, dtype=torch.float64, device=device, requires_grad=True)
+    lower = torch.ones(4, 4, dtype=torch.bool, device=device).tril(-1)
+    cost = soft_dtw_batch(d, symmetric=True)
+    assert_equal(cost, soft_dtw_batch(torch.where(lower[..., None, None], 0.0, d.detach()), symmetric=True))
+    upper = soft_dtw_batch(d.detach())
+    assert_equal(cost, torch.where(lower, upper.T, upper))
+    cost.sum().backward()
+    assert (d.grad[lower] == 0).all()
+    assert (d.grad[~lower] != 0).any()
+
+
+def test_symmetric_gradcheck() -> None:
+    """Gradients of symmetric mode match finite differences."""
+    d = torch.rand(3, 3, 4, 5, dtype=torch.float64, requires_grad=True)
+    lengths = torch.tensor([4, 2, 3])
+    gradcheck(lambda t: soft_dtw_batch(t, lengths, torch.tensor([5, 3, 1]), gamma=0.5, symmetric=True), d)
+
+
+@pytest.mark.requires_gpu
+@pytest.mark.parametrize("keep_r", [False, True])
+def test_symmetric_cpu_cuda_parity(keep_r: bool) -> None:  # noqa: FBT001
+    """Symmetric mode on CUDA matches CPU: costs, R and gradients."""
+    x, lengths = symmetric_batch("cpu", n=6, s=9)
+    d = (torch.cdist(x[:, None], x[None]) ** 2).detach()
+    args = (lengths, lengths, 1.0, 2, True, keep_r)
+    cost_cpu, R_cpu = torch.ops.torchdtw.soft_dtw(d, *args)
+    cost_cuda, R_cuda = torch.ops.torchdtw.soft_dtw(
+        d.cuda(), *(a.cuda() if isinstance(a, torch.Tensor) else a for a in args)
+    )
+    torch.testing.assert_close(cost_cuda.cpu(), cost_cpu)
+    torch.testing.assert_close(R_cuda.cpu(), R_cpu)
+    (d_cpu,), (d_cuda,) = cpu_and_cuda(d)
+    soft_dtw_batch(d_cpu, lengths, lengths, symmetric=True).sum().backward()
+    soft_dtw_batch(d_cuda, lengths.cuda(), lengths.cuda(), symmetric=True).sum().backward()
+    torch.testing.assert_close(d_cuda.grad.cpu(), d_cpu.grad)
 
 
 def test_python_rank_checks() -> None:

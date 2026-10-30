@@ -82,6 +82,19 @@ def test_dtw_batch_length_exceeds_block() -> None:
         dtw_batch(d, sx, sy, symmetric=False)
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("symmetric", [False, True])
+def test_dtw_batch_default_lengths(device: str, symmetric: bool) -> None:  # noqa: FBT001
+    """Absent sx or sy default to the padded sizes."""
+    d = make_tensor((3, 3, 4, 5), dtype=torch.float32, low=0.0, high=1.0, device=device)
+    sx = torch.full((3,), 4, device=device)
+    sy = torch.full((3,), 5, device=device)
+    expected = dtw_batch(d, sx, sy, symmetric=symmetric)
+    torch.testing.assert_close(dtw_batch(d, symmetric=symmetric), expected, rtol=0, atol=0)
+    torch.testing.assert_close(dtw_batch(d, sx, symmetric=symmetric), expected, rtol=0, atol=0)
+    torch.testing.assert_close(dtw_batch(d, sy=sy, symmetric=symmetric), expected, rtol=0, atol=0)
+
+
 def test_dtw_batch_lengths_must_be_integers() -> None:
     """dtw_batch rejects floating-point sx and sy."""
     d, sx, sy = _batch()
@@ -107,7 +120,7 @@ def test_dtw_batch_cuda_clamps_lengths(symmetric: bool) -> None:  # noqa: FBT001
 def test_dtw_batch_lengths_must_be_cuda() -> None:
     """On CUDA, dtw_batch requires sx/sy to also be on CUDA."""
     d, sx, sy = _batch()
-    with pytest.raises(RuntimeError, match="must be on CUDA"):
+    with pytest.raises(RuntimeError, match="same device"):
         dtw_batch(d.cuda(), sx, sy, symmetric=False)
 
 

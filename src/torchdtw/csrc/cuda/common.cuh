@@ -112,6 +112,37 @@ private:
   }
 };
 
+// Grid of a kernel with one block per pair x < y (x <= y with the diagonal) of an n x n batch, see
+// upper_triangle_pair.
+inline dim3 upper_triangle_grid(int64_t n, bool diagonal) {
+  constexpr int64_t max_grid_x = 2147483647; // 2^31 - 1
+  const int64_t num_pairs = diagonal ? n * (n + 1) / 2 : n * (n - 1) / 2;
+  STD_TORCH_CHECK(
+      num_pairs <= max_grid_x, "symmetric batch too large: its number of pairs exceeds the CUDA grid limit");
+  return dim3(static_cast<unsigned int>(num_pairs));
+}
+
+// The pair (x, y) of the b-th block of an upper_triangle_grid, ordered as in for_upper_triangle.
+__device__ __forceinline__ void upper_triangle_pair(int32_t b, bool diagonal, int32_t& x, int32_t& y) {
+  y = static_cast<int32_t>((1.0f + sqrtf(1.0f + 8.0f * static_cast<float>(b))) / 2.0f);
+  while (static_cast<int64_t>(y) * (y - 1) / 2 > b)
+    y--;
+  while (static_cast<int64_t>(y + 1) * y / 2 <= b)
+    y++;
+  x = b - y * (y - 1) / 2;
+  // With the diagonal, the pairs (x, y) are the pairs x < y + 1 of the strict triangle, shifted by one.
+  if (diagonal)
+    y--;
+}
+
+// Calls f.template operator()<value>(), with `value` as a compile-time constant.
+template <typename F> void dispatch_bool(bool value, const F& f) {
+  if (value)
+    f.template operator()<true>();
+  else
+    f.template operator()<false>();
+}
+
 // Calls f.template operator()<index_t>() with the index type of the distances: int64_t if needs_64bit, else int32_t.
 template <typename F> void dispatch_index(bool needs_64bit, const F& f) {
   if (needs_64bit)

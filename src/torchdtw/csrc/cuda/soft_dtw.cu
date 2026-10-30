@@ -120,27 +120,48 @@ __device__ __forceinline__ void fill_padding(T* block, index_t s1, index_t s2, i
   }
 }
 
-// One block per pair (x, y), see as_all_pairs, the launch covering rows [x0, x0 + gridDim.x) (see launch_wavefront).
-template <typename scalar_t, typename index_t, bool global>
+// The pair (x, y) of a block: one block per pair (x, y), see as_all_pairs, or with `symmetric` per pair x <= y, the
+// launch covering blocks [x0, x0 + gridDim.x) of the first grid dimension (see launch_wavefront). The kernels take
+// `symmetric` as a template parameter: as a runtime flag, it cost the forward kernel 2 registers and ~3% even
+// without symmetric mode.
+template <bool symmetric> __device__ __forceinline__ void block_pair(int64_t x0, int32_t& x, int32_t& y) {
+  const int32_t row = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
+  if constexpr (symmetric) {
+    upper_triangle_pair(row, true, x, y);
+  } else {
+    x = row;
+    y = blockIdx.y;
+  }
+}
+
+template <typename scalar_t, typename index_t, bool global, bool symmetric>
 __global__ void soft_dtw_kernel(
     PackedTensorAccessor32<scalar_t, 2> out, acc_t<scalar_t>* R,
     const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths sx, const Lengths sy, bool paired,
     acc_t<scalar_t> gamma, int64_t bandwidth, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
   using acc_t = torchdtw::acc_t<scalar_t>;
-  const int32_t x = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
-  const int32_t y = blockIdx.y;
+  int32_t x, y;
+  block_pair<symmetric>(x0, x, y);
+  // With `symmetric`, the block also owns the mirror pair (y, x).
+  const bool mirror = symmetric && x != y;
   const PairLengths lengths(sx, x, sy, paired ? x : y);
   const int32_t N = lengths.N;
   const int32_t M = lengths.M;
   const index_t s1 = distances.size(2);
   const index_t ld = distances.size(3);
   acc_t* const R_xy = R == nullptr ? nullptr : R + (static_cast<index_t>(x) * distances.size(1) + y) * s1 * ld;
-  // The padding of the kept R is +inf, as no alignment reaches it.
-  if (R_xy != nullptr)
+  // The padding of the kept R is +inf, as no alignment reaches it, and so is the whole mirror block, never read.
+  if (R_xy != nullptr) {
     fill_padding(R_xy, s1, ld, N, M, infinity<acc_t>());
+    if (mirror)
+      fill_padding(R + (static_cast<index_t>(y) * distances.size(1) + x) * s1 * ld, s1, ld, 0, 0, infinity<acc_t>());
+  }
   if (N == 0 || M == 0) {
-    if (threadIdx.x == 0)
+    if (threadIdx.x == 0) {
       out[x][y] = static_cast<scalar_t>(0);
+      if (mirror)
+        out[y][x] = static_cast<scalar_t>(0);
+    }
     return;
   }
 
@@ -161,18 +182,23 @@ __global__ void soft_dtw_kernel(
                                                                r_smem + 2 * buf_len};
   wavefront(cell, N, M);
 
-  if (threadIdx.x == 0)
-    out[x][y] = static_cast<scalar_t>(cell.r_alpha[M - 1]);
+  if (threadIdx.x == 0) {
+    const scalar_t value = static_cast<scalar_t>(cell.r_alpha[M - 1]);
+    out[x][y] = value;
+    if (mirror)
+      out[y][x] = value;
+  }
 }
 
-template <typename scalar_t, typename index_t, bool global>
+template <typename scalar_t, typename index_t, bool global, bool symmetric>
 __global__ void soft_dtw_backward_kernel(
     scalar_t* grad_distances, const PackedTensorAccessor32<scalar_t, 2> grad, const acc_t<scalar_t>* R,
     const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths sx, const Lengths sy, bool paired,
     acc_t<scalar_t> inv_gamma, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
   using acc_t = torchdtw::acc_t<scalar_t>;
-  const int32_t x = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
-  const int32_t y = blockIdx.y;
+  int32_t x, y;
+  block_pair<symmetric>(x0, x, y);
+  const bool mirror = symmetric && x != y;
   const PairLengths lengths(sx, x, sy, paired ? x : y);
   const int32_t N = lengths.N;
   const int32_t M = lengths.M;
@@ -181,26 +207,24 @@ __global__ void soft_dtw_backward_kernel(
   const index_t offset = (static_cast<index_t>(x) * distances.size(1) + y) * s1 * ld;
   scalar_t* const grad_xy = grad_distances + offset;
 
-  // Padding beyond the pair's lengths gets no gradient.
+  // Padding beyond the pair's lengths gets no gradient, and neither does the mirror block, never read.
   fill_padding(grad_xy, s1, ld, N, M, static_cast<scalar_t>(0));
+  if (mirror) {
+    scalar_t* const grad_yx = grad_distances + (static_cast<index_t>(y) * distances.size(1) + x) * s1 * ld;
+    fill_padding(grad_yx, s1, ld, 0, 0, static_cast<scalar_t>(0));
+  }
   if (N == 0 || M == 0)
     return;
+  // With `symmetric`, the costs of both (x, y) and (y, x) are this pair's.
+  const acc_t g =
+      mirror ? static_cast<acc_t>(grad[x][y]) + static_cast<acc_t>(grad[y][x]) : static_cast<acc_t>(grad[x][y]);
 
   unsigned char* const smem = block_diagonals<global>(scratch, scratch_stride);
   const int32_t buf_len = static_cast<int32_t>(ld);
   acc_t* const e_smem = reinterpret_cast<acc_t*>(smem);
   const auto distances_xy = distances[x][y];
-  SoftBackwardCell<acc_t, scalar_t, decltype(distances_xy), index_t> cell{distances_xy,
-                                                                          R + offset,
-                                                                          grad_xy,
-                                                                          ld,
-                                                                          N,
-                                                                          M,
-                                                                          static_cast<acc_t>(grad[x][y]),
-                                                                          inv_gamma,
-                                                                          e_smem,
-                                                                          e_smem + buf_len,
-                                                                          e_smem + 2 * buf_len};
+  SoftBackwardCell<acc_t, scalar_t, decltype(distances_xy), index_t> cell{
+      distances_xy, R + offset, grad_xy, ld, N, M, g, inv_gamma, e_smem, e_smem + buf_len, e_smem + 2 * buf_len};
   wavefront(cell, N, M);
 }
 
@@ -213,12 +237,12 @@ struct SoftLaunch {
   bool needs_64bit;
 };
 
-template <typename acc_t> SoftLaunch soft_dtw_launch(const Tensor& pairs) {
+template <typename acc_t> SoftLaunch soft_dtw_launch(const Tensor& pairs, bool symmetric) {
   const int64_t n1 = pairs.size(0);
   const int64_t n2 = pairs.size(1);
   const int64_t s1 = pairs.size(2);
   const int64_t s2 = pairs.size(3);
-  const dim3 num_blocks = pair_grid(n1, n2);
+  const dim3 num_blocks = symmetric ? upper_triangle_grid(n1, true) : pair_grid(n1, n2);
   return {num_blocks,
           wavefront_threads(s1, s2, num_blocks.x),
           3 * static_cast<size_t>(s2) * sizeof(acc_t),
@@ -228,9 +252,9 @@ template <typename acc_t> SoftLaunch soft_dtw_launch(const Tensor& pairs) {
 template <typename distances_t>
 void soft_dtw_cuda_impl(
     Tensor& out, Tensor& R, bool keep_R, const Tensor& pairs, const std::optional<Tensor>& sx,
-    const std::optional<Tensor>& sy, bool paired, double gamma, int64_t bandwidth) {
+    const std::optional<Tensor>& sy, bool paired, bool symmetric, double gamma, int64_t bandwidth) {
   using acc_t = torchdtw::acc_t<distances_t>;
-  const SoftLaunch launch = soft_dtw_launch<acc_t>(pairs);
+  const SoftLaunch launch = soft_dtw_launch<acc_t>(pairs, symmetric);
   const Lengths sx_l = make_lengths(sx, pairs.size(2));
   const Lengths sy_l = make_lengths(sy, pairs.size(3));
   acc_t* const R_data = keep_R ? reinterpret_cast<acc_t*>(R.data_ptr()) : nullptr;
@@ -239,19 +263,21 @@ void soft_dtw_cuda_impl(
   launch_wavefront(
       pairs, storage, launch.num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
         constexpr bool kGlobal = decltype(global)::value;
-        dispatch_index(launch.needs_64bit, [&]<typename index_t>() {
-          soft_dtw_kernel<distances_t, index_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
-              packed_accessor32<distances_t, 2>(out),
-              R_data,
-              packed_accessor<distances_t, 4, index_t>(pairs),
-              sx_l,
-              sy_l,
-              paired,
-              static_cast<acc_t>(gamma),
-              bandwidth,
-              scratch,
-              storage.scratch_stride,
-              x0);
+        dispatch_bool(symmetric, [&]<bool kSymmetric>() {
+          dispatch_index(launch.needs_64bit, [&]<typename index_t>() {
+            soft_dtw_kernel<distances_t, index_t, kGlobal, kSymmetric><<<grid, launch.num_threads, smem, stream>>>(
+                packed_accessor32<distances_t, 2>(out),
+                R_data,
+                packed_accessor<distances_t, 4, index_t>(pairs),
+                sx_l,
+                sy_l,
+                paired,
+                static_cast<acc_t>(gamma),
+                bandwidth,
+                scratch,
+                storage.scratch_stride,
+                x0);
+          });
         });
         check_launch("soft_dtw_kernel");
       });
@@ -260,9 +286,9 @@ void soft_dtw_cuda_impl(
 template <typename distances_t>
 void soft_dtw_backward_cuda_impl(
     Tensor& grad_distances, const Tensor& grad, const Tensor& pairs, const Tensor& R, const std::optional<Tensor>& sx,
-    const std::optional<Tensor>& sy, bool paired, double gamma) {
+    const std::optional<Tensor>& sy, bool paired, bool symmetric, double gamma) {
   using acc_t = torchdtw::acc_t<distances_t>;
-  const SoftLaunch launch = soft_dtw_launch<acc_t>(pairs);
+  const SoftLaunch launch = soft_dtw_launch<acc_t>(pairs, symmetric);
   const Lengths sx_l = make_lengths(sx, pairs.size(2));
   const Lengths sy_l = make_lengths(sy, pairs.size(3));
   distances_t* const out = reinterpret_cast<distances_t*>(grad_distances.data_ptr());
@@ -273,19 +299,22 @@ void soft_dtw_backward_cuda_impl(
   launch_wavefront(
       pairs, storage, launch.num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
         constexpr bool kGlobal = decltype(global)::value;
-        dispatch_index(launch.needs_64bit, [&]<typename index_t>() {
-          soft_dtw_backward_kernel<distances_t, index_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
-              out,
-              packed_accessor32<distances_t, 2>(grad),
-              R_data,
-              packed_accessor<distances_t, 4, index_t>(pairs),
-              sx_l,
-              sy_l,
-              paired,
-              inv_gamma,
-              scratch,
-              storage.scratch_stride,
-              x0);
+        dispatch_bool(symmetric, [&]<bool kSymmetric>() {
+          dispatch_index(launch.needs_64bit, [&]<typename index_t>() {
+            soft_dtw_backward_kernel<distances_t, index_t, kGlobal, kSymmetric>
+                <<<grid, launch.num_threads, smem, stream>>>(
+                    out,
+                    packed_accessor32<distances_t, 2>(grad),
+                    R_data,
+                    packed_accessor<distances_t, 4, index_t>(pairs),
+                    sx_l,
+                    sy_l,
+                    paired,
+                    inv_gamma,
+                    scratch,
+                    storage.scratch_stride,
+                    x0);
+          });
         });
         check_launch("soft_dtw_backward_kernel");
       });
@@ -293,12 +322,13 @@ void soft_dtw_backward_cuda_impl(
 
 std::tuple<Tensor, Tensor> soft_dtw_cuda(
     const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, double gamma,
-    int64_t bandwidth, bool keep_R) {
+    int64_t bandwidth, bool symmetric, bool keep_R) {
   return soft_dtw_op(
       distances,
       sx,
       sy,
       gamma,
+      symmetric,
       keep_R,
       [&]<typename distances_t>(Tensor& out, Tensor& R, const Tensor& pairs, bool paired) {
         if (pairs.numel() == 0) {
@@ -307,13 +337,13 @@ std::tuple<Tensor, Tensor> soft_dtw_cuda(
           return;
         }
         const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
-        soft_dtw_cuda_impl<distances_t>(out, R, keep_R, pairs, sx, sy, paired, gamma, bandwidth);
+        soft_dtw_cuda_impl<distances_t>(out, R, keep_R, pairs, sx, sy, paired, symmetric, gamma, bandwidth);
       });
 }
 
 Tensor soft_dtw_backward_cuda(
     const Tensor& grad, const Tensor& distances, const Tensor& R, const std::optional<Tensor>& sx,
-    const std::optional<Tensor>& sy, double gamma) {
+    const std::optional<Tensor>& sy, double gamma, bool symmetric) {
   return soft_dtw_backward_op(
       grad,
       distances,
@@ -321,6 +351,7 @@ Tensor soft_dtw_backward_cuda(
       sx,
       sy,
       gamma,
+      symmetric,
       [&]<typename distances_t>(Tensor& grad_distances, const Tensor& grad_pairs, const Tensor& pairs, bool paired) {
         STD_TORCH_CHECK(
             grad.is_cuda() && R.is_cuda() && grad.get_device() == distances.get_device() &&
@@ -329,7 +360,8 @@ Tensor soft_dtw_backward_cuda(
         if (pairs.numel() == 0)
           return;
         const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
-        soft_dtw_backward_cuda_impl<distances_t>(grad_distances, grad_pairs, pairs, R, sx, sy, paired, gamma);
+        soft_dtw_backward_cuda_impl<distances_t>(
+            grad_distances, grad_pairs, pairs, R, sx, sy, paired, symmetric, gamma);
       });
 }
 

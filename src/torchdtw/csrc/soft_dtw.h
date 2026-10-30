@@ -96,7 +96,8 @@ inline torch::headeronly::ScalarType acc_scalar_type(torch::headeronly::ScalarTy
 
 // Checks shared by the CPU and CUDA soft_dtw ops.
 inline void check_soft_dtw_inputs(
-    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, double gamma) {
+    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, double gamma,
+    bool symmetric) {
   using torch::headeronly::ScalarType;
   STD_TORCH_CHECK(
       distances.dim() == 3 || distances.dim() == 4, "distances must be a 3D (paired) or 4D (all pairs) tensor");
@@ -107,21 +108,10 @@ inline void check_soft_dtw_inputs(
       "distances must be float16, bfloat16, float32 or float64");
   STD_TORCH_CHECK(gamma > 0, "gamma must be positive");
   const bool paired = distances.dim() == 3;
-  const int64_t sizes[2] = {distances.size(0), paired ? distances.size(0) : distances.size(1)};
-  const std::optional<Tensor>* lengths[2] = {&sx, &sy};
-  for (int k = 0; k < 2; k++) {
-    if (!lengths[k]->has_value())
-      continue;
-    const Tensor& t = lengths[k]->value();
-    STD_TORCH_CHECK(t.dim() == 1, "sx and sy must be 1D tensors");
-    STD_TORCH_CHECK(t.size(0) == sizes[k], "sx and sy sizes must match the batch dimensions of distances");
-    STD_TORCH_CHECK(is_lengths_dtype(t.scalar_type()), "sx and sy must have an integer dtype");
-    STD_TORCH_CHECK(
-        t.is_cuda() == distances.is_cuda() && t.get_device() == distances.get_device(),
-        "sx and sy must be on the same device as distances");
-  }
-  if (sx.has_value() && sy.has_value())
-    STD_TORCH_CHECK(sx->scalar_type() == sy->scalar_type(), "sx and sy dtypes do not match");
+  check_lengths_tensors(distances, sx, sy, distances.size(0), paired ? distances.size(0) : distances.size(1));
+  STD_TORCH_CHECK(
+      !symmetric || (!paired && distances.size(0) == distances.size(1)),
+      "symmetric soft_dtw requires 4D distances with distances.size(0) == distances.size(1)");
 }
 
 // Checks of the backward op's own inputs: the gradient of the cost and the R matrix saved by the forward.
@@ -153,12 +143,13 @@ template <typename F> void dispatch_soft_dtw(torch::headeronly::ScalarType dista
 }
 
 // The soft_dtw op, shared by the backends: run.template operator()<distances_t>(out, R, pairs, paired) fills
-// the (n1, n2) costs `out`, and the R matrix when keep_R, from the distances viewed as all pairs.
+// the (n1, n2) costs `out`, and the R matrix when keep_R, from the distances viewed as all pairs. With `symmetric`,
+// the two batches are the same: only the pairs x <= y are computed, from the blocks distances[x][y], and mirrored.
 template <typename Run>
 std::tuple<Tensor, Tensor> soft_dtw_op(
     const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, double gamma,
-    bool keep_R, const Run& run) {
-  check_soft_dtw_inputs(distances, sx, sy, gamma);
+    bool symmetric, bool keep_R, const Run& run) {
+  check_soft_dtw_inputs(distances, sx, sy, gamma, symmetric);
   const bool paired = distances.dim() == 3;
   const Tensor pairs = as_all_pairs(distances);
   Tensor out = torch::stable::new_empty(distances, {pairs.size(0), pairs.size(1)});
@@ -178,8 +169,8 @@ std::tuple<Tensor, Tensor> soft_dtw_op(
 template <typename Run>
 Tensor soft_dtw_backward_op(
     const Tensor& grad, const Tensor& distances, const Tensor& R, const std::optional<Tensor>& sx,
-    const std::optional<Tensor>& sy, double gamma, const Run& run) {
-  check_soft_dtw_inputs(distances, sx, sy, gamma);
+    const std::optional<Tensor>& sy, double gamma, bool symmetric, const Run& run) {
+  check_soft_dtw_inputs(distances, sx, sy, gamma, symmetric);
   check_soft_dtw_backward_inputs(grad, distances, R);
   const bool paired = distances.dim() == 3;
   const Tensor pairs = as_all_pairs(distances);

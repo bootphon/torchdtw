@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <torch/csrc/stable/tensor.h>
@@ -77,6 +78,26 @@ TORCHDTW_HOST_DEVICE inline int64_t visit_lengths_dtype(torch::headeronly::Scala
   }
 }
 
+// Checks of the optional lengths sx and sy of the ops, for batch dimensions of sizes nx and ny.
+inline void check_lengths_tensors(
+    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, int64_t nx, int64_t ny) {
+  const int64_t sizes[2] = {nx, ny};
+  const std::optional<Tensor>* lengths[2] = {&sx, &sy};
+  for (int k = 0; k < 2; k++) {
+    if (!lengths[k]->has_value())
+      continue;
+    const Tensor& t = lengths[k]->value();
+    STD_TORCH_CHECK(t.dim() == 1, "sx and sy must be 1D tensors");
+    STD_TORCH_CHECK(t.size(0) == sizes[k], "sx and sy sizes must match the batch dimensions of distances");
+    STD_TORCH_CHECK(is_lengths_dtype(t.scalar_type()), "sx and sy must have an integer dtype");
+    STD_TORCH_CHECK(
+        t.is_cuda() == distances.is_cuda() && t.get_device() == distances.get_device(),
+        "sx and sy must be on the same device as distances");
+  }
+  if (sx.has_value() && sy.has_value())
+    STD_TORCH_CHECK(sx->scalar_type() == sy->scalar_type(), "sx and sy dtypes do not match");
+}
+
 // Sequence lengths, read from a 1D integer tensor, or all equal to `fallback` (the padded size) when it is absent.
 // The dtype is switched on at run time instead of being a template parameter: kernels are then compiled once instead
 // of once per integer dtype, which divides the size of the binaries.
@@ -98,6 +119,29 @@ inline Lengths make_lengths(const std::optional<Tensor>& t, int64_t fallback) {
   if (!t.has_value())
     return {nullptr, 0, fallback, torch::headeronly::ScalarType::Long};
   return {t->data_ptr(), t->strides()[0], fallback, t->scalar_type()};
+}
+
+// Calls f(x, y) on the pairs of flat indices [start, end) of the upper triangle of an n x n grid of pairs, ordered
+// by y: pair (x, y) has index b = y * (y - 1) / 2 + x for x < y, or with the diagonal b = y * (y + 1) / 2 + x for
+// x <= y. Parallelizing over b rather than over rows gives every worker as many pairs: row x owns n - 1 - x of them.
+template <typename F> inline void for_upper_triangle(int64_t start, int64_t end, bool diagonal, const F& f) {
+  // With the diagonal, the pairs (x, y) are the pairs x < y + 1 of the strict triangle, shifted by one.
+  const int64_t shift = diagonal ? 1 : 0;
+  // Seek (x, y) for flat index `start` via the triangular-number inverse, corrected with integer steps to absorb
+  // double rounding; then advance incrementally to avoid a sqrt per pair.
+  int64_t y = static_cast<int64_t>((1.0 + std::sqrt(1.0 + 8.0 * static_cast<double>(start))) / 2.0);
+  while (y > 0 && y * (y - 1) / 2 > start)
+    y--;
+  while ((y + 1) * y / 2 <= start)
+    y++;
+  int64_t x = start - y * (y - 1) / 2;
+  for (int64_t b = start; b < end; b++) {
+    f(x, y - shift);
+    if (++x == y) {
+      x = 0;
+      y++;
+    }
+  }
 }
 
 // Row-major DP over an N x M grid, stored in `out` with row stride `ld`. `cell` computes each cell's value:

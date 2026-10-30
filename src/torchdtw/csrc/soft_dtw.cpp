@@ -96,10 +96,25 @@ static void check_lengths(const Lengths& sx, const Lengths& sy, const Tensor& pa
   }
 }
 
+// Calls f(x, y, workspace) on the pairs of the batch in parallel, with a workspace per chunk of pairs: all the
+// n1 x n2 pairs, or with `symmetric` the pairs x <= y of the upper triangle, see for_upper_triangle.
+template <typename T, typename F> static void parallel_pairs(int64_t n1, int64_t n2, bool symmetric, const F& f) {
+  const int64_t num_pairs = symmetric ? n1 * (n1 + 1) / 2 : n1 * n2;
+  torch::stable::parallel_for(0, num_pairs, 1, [&](int64_t start, int64_t end) {
+    std::vector<T> workspace;
+    if (symmetric) {
+      for_upper_triangle(start, end, true, [&](int64_t x, int64_t y) { f(x, y, workspace); });
+    } else {
+      for (int64_t p = start; p < end; p++)
+        f(p / n2, p % n2, workspace);
+    }
+  });
+}
+
 template <typename distances_t>
 void soft_dtw_cpu_impl(
     Tensor& out, Tensor& R, bool keep_R, const Tensor& pairs, const std::optional<Tensor>& sx_opt,
-    const std::optional<Tensor>& sy_opt, bool paired, double gamma, int64_t bandwidth) {
+    const std::optional<Tensor>& sy_opt, bool paired, bool symmetric, double gamma, int64_t bandwidth) {
   using acc = acc_t<distances_t>;
   const int64_t n2 = pairs.size(1);
   const int64_t s1 = pairs.size(2);
@@ -113,25 +128,23 @@ void soft_dtw_cpu_impl(
   const acc gamma_acc = static_cast<acc>(gamma);
   const acc inv_gamma = static_cast<acc>(1) / gamma_acc;
 
-  torch::stable::parallel_for(0, pairs.size(0) * n2, 1, [&](int64_t start, int64_t end) {
-    std::vector<acc> workspace;
-    for (int64_t p = start; p < end; p++) {
-      const int64_t x = p / n2;
-      const int64_t y = p % n2;
-      const int64_t N = std::max<int64_t>(sx[x], 0);
-      const int64_t M = std::max<int64_t>(sy[paired ? x : y], 0);
-      // The padding of the kept R is +inf, as no alignment reaches it.
-      if (R_data != nullptr)
-        fill_padding(R_data + p * s1 * s2, s1, s2, N, M, infinity<acc>());
-      if (N == 0 || M == 0) {
-        out_a[x][y] = static_cast<distances_t>(0);
-        continue;
-      }
+  parallel_pairs<acc>(pairs.size(0), n2, symmetric, [&](int64_t x, int64_t y, std::vector<acc>& workspace) {
+    const bool mirror = symmetric && x != y;
+    const int64_t N = std::max<int64_t>(sx[x], 0);
+    const int64_t M = std::max<int64_t>(sy[paired ? x : y], 0);
+    // The padding of the kept R is +inf, as no alignment reaches it, and so is the whole mirror block, never read.
+    if (R_data != nullptr) {
+      fill_padding(R_data + (x * n2 + y) * s1 * s2, s1, s2, N, M, infinity<acc>());
+      if (mirror)
+        fill_padding(R_data + (y * n2 + x) * s1 * s2, s1, s2, 0, 0, infinity<acc>());
+    }
+    distances_t value = 0;
+    if (N > 0 && M > 0) {
       // Fill R in place when it is kept for the backward pass, a reused workspace otherwise.
       acc* cost;
       int64_t ld;
       if (R_data != nullptr) {
-        cost = R_data + p * s1 * s2;
+        cost = R_data + (x * n2 + y) * s1 * s2;
         ld = s2;
       } else {
         if (static_cast<int64_t>(workspace.size()) < N * M)
@@ -142,15 +155,19 @@ void soft_dtw_cpu_impl(
       const SoftForwardCell<distances_t> cell{
           PairDistances<distances_t>(distances_a[x][y]), N, M, bandwidth, gamma_acc, inv_gamma};
       fill_grid(cell, N, M, cost, ld);
-      out_a[x][y] = static_cast<distances_t>(cost[(N - 1) * ld + M - 1]);
+      value = static_cast<distances_t>(cost[(N - 1) * ld + M - 1]);
     }
+    out_a[x][y] = value;
+    if (mirror)
+      out_a[y][x] = value;
   });
 }
 
 template <typename distances_t>
 void soft_dtw_backward_cpu_impl(
     Tensor& grad_distances, const Tensor& grad, const Tensor& pairs, const Tensor& R,
-    const std::optional<Tensor>& sx_opt, const std::optional<Tensor>& sy_opt, bool paired, double gamma) {
+    const std::optional<Tensor>& sx_opt, const std::optional<Tensor>& sy_opt, bool paired, bool symmetric,
+    double gamma) {
   using acc = acc_t<distances_t>;
   const int64_t n2 = pairs.size(1);
   const int64_t s1 = pairs.size(2);
@@ -164,50 +181,52 @@ void soft_dtw_backward_cpu_impl(
   distances_t* const out = reinterpret_cast<distances_t*>(grad_distances.data_ptr());
   const acc inv_gamma = static_cast<acc>(1) / static_cast<acc>(gamma);
 
-  torch::stable::parallel_for(0, pairs.size(0) * n2, 1, [&](int64_t start, int64_t end) {
-    std::vector<acc> log_e;
-    for (int64_t p = start; p < end; p++) {
-      const int64_t x = p / n2;
-      const int64_t y = p % n2;
-      const int64_t N = std::max<int64_t>(sx[x], 0);
-      const int64_t M = std::max<int64_t>(sy[paired ? x : y], 0);
-      distances_t* const out_xy = out + p * s1 * s2;
-      // Padding beyond the pair's lengths gets no gradient.
-      fill_padding(out_xy, s1, s2, N, M, static_cast<distances_t>(0));
-      if (N == 0 || M == 0)
-        continue;
-      if (static_cast<int64_t>(log_e.size()) < N * M)
-        log_e.resize(N * M);
-      const SoftBackwardCell<distances_t> cell{
-          PairDistances<distances_t>(distances_a[x][y]), R_data + p * s1 * s2, s2, N, M, inv_gamma};
-      fill_grid(cell, N, M, log_e.data(), M);
-      const acc g = static_cast<acc>(grad_a[x][y]);
-      for (int64_t i = 0; i < N; i++) {
-        const acc* const log_e_i = log_e.data() + (N - 1 - i) * M;
-        for (int64_t j = 0; j < M; j++)
-          out_xy[i * s2 + j] = static_cast<distances_t>(g * std::exp(log_e_i[M - 1 - j]));
-      }
+  parallel_pairs<acc>(pairs.size(0), n2, symmetric, [&](int64_t x, int64_t y, std::vector<acc>& log_e) {
+    const bool mirror = symmetric && x != y;
+    const int64_t N = std::max<int64_t>(sx[x], 0);
+    const int64_t M = std::max<int64_t>(sy[paired ? x : y], 0);
+    distances_t* const out_xy = out + (x * n2 + y) * s1 * s2;
+    // Padding beyond the pair's lengths gets no gradient, and neither does the mirror block, never read.
+    fill_padding(out_xy, s1, s2, N, M, static_cast<distances_t>(0));
+    if (mirror)
+      fill_padding(out + (y * n2 + x) * s1 * s2, s1, s2, 0, 0, static_cast<distances_t>(0));
+    if (N == 0 || M == 0)
+      return;
+    if (static_cast<int64_t>(log_e.size()) < N * M)
+      log_e.resize(N * M);
+    const SoftBackwardCell<distances_t> cell{
+        PairDistances<distances_t>(distances_a[x][y]), R_data + (x * n2 + y) * s1 * s2, s2, N, M, inv_gamma};
+    fill_grid(cell, N, M, log_e.data(), M);
+    // With `symmetric`, the costs of both (x, y) and (y, x) are this pair's.
+    acc g = static_cast<acc>(grad_a[x][y]);
+    if (mirror)
+      g += static_cast<acc>(grad_a[y][x]);
+    for (int64_t i = 0; i < N; i++) {
+      const acc* const log_e_i = log_e.data() + (N - 1 - i) * M;
+      for (int64_t j = 0; j < M; j++)
+        out_xy[i * s2 + j] = static_cast<distances_t>(g * std::exp(log_e_i[M - 1 - j]));
     }
   });
 }
 
 std::tuple<Tensor, Tensor> soft_dtw_cpu(
     const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, double gamma,
-    int64_t bandwidth, bool keep_R) {
+    int64_t bandwidth, bool symmetric, bool keep_R) {
   return soft_dtw_op(
       distances,
       sx,
       sy,
       gamma,
+      symmetric,
       keep_R,
       [&]<typename distances_t>(Tensor& out, Tensor& R, const Tensor& pairs, bool paired) {
-        soft_dtw_cpu_impl<distances_t>(out, R, keep_R, pairs, sx, sy, paired, gamma, bandwidth);
+        soft_dtw_cpu_impl<distances_t>(out, R, keep_R, pairs, sx, sy, paired, symmetric, gamma, bandwidth);
       });
 }
 
 Tensor soft_dtw_backward_cpu(
     const Tensor& grad, const Tensor& distances, const Tensor& R, const std::optional<Tensor>& sx,
-    const std::optional<Tensor>& sy, double gamma) {
+    const std::optional<Tensor>& sy, double gamma, bool symmetric) {
   return soft_dtw_backward_op(
       grad,
       distances,
@@ -215,16 +234,19 @@ Tensor soft_dtw_backward_cpu(
       sx,
       sy,
       gamma,
+      symmetric,
       [&]<typename distances_t>(Tensor& grad_distances, const Tensor& grad_pairs, const Tensor& pairs, bool paired) {
-        soft_dtw_backward_cpu_impl<distances_t>(grad_distances, grad_pairs, pairs, R, sx, sy, paired, gamma);
+        soft_dtw_backward_cpu_impl<distances_t>(grad_distances, grad_pairs, pairs, R, sx, sy, paired, symmetric, gamma);
       });
 }
 
 STABLE_TORCH_LIBRARY_FRAGMENT(torchdtw, m) {
   m.def(
-      "soft_dtw(Tensor distances, Tensor? sx, Tensor? sy, float gamma, int bandwidth, bool keep_R) -> (Tensor, "
-      "Tensor)");
-  m.def("soft_dtw_backward(Tensor grad, Tensor distances, Tensor R, Tensor? sx, Tensor? sy, float gamma) -> Tensor");
+      "soft_dtw(Tensor distances, Tensor? sx, Tensor? sy, float gamma, int bandwidth, bool symmetric, bool keep_R) "
+      "-> (Tensor, Tensor)");
+  m.def(
+      "soft_dtw_backward(Tensor grad, Tensor distances, Tensor R, Tensor? sx, Tensor? sy, float gamma, bool symmetric) "
+      "-> Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(torchdtw, CPU, m) {

@@ -44,7 +44,7 @@ or a floating dtype.
 ### `dtw_batch`
 
 ```python
-dtw_batch(distances, sx, sy, *, symmetric)
+dtw_batch(distances, sx=None, sy=None, *, symmetric=False)
 ```
 
 Compute the batched DTW cost on the ``distances`` 4D tensor.
@@ -60,9 +60,12 @@ dtype and may overflow on long sequences; use a wide enough integer dtype or a f
 
 - **distances** (<code>Tensor</code>) – A 4D tensor of shape (n1, n2, s1, s2) representing the pairwise distances between two
 batches of sequences.
-- **sx** (<code>Tensor</code>) – A 1D tensor of shape (n1,) representing the lengths of the sequences in the first batch.
-- **sy** (<code>Tensor</code>) – A 1D tensor of shape (n2,) representing the lengths of the sequences in the second batch.
-- **symmetric** (<code>bool</code>) – Whether or not the DTW is symmetric (i.e., the two batches are the same).
+- **sx** (<code>Tensor | None</code>) – An optional 1D integer tensor of shape (n1,) with the lengths of the sequences in the first batch.
+Defaults to s1.
+- **sy** (<code>Tensor | None</code>) – An optional 1D integer tensor of shape (n2,) with the lengths of the sequences in the second batch.
+Defaults to s2.
+- **symmetric** (<code>bool</code>) – Whether the two batches are the same: only the pairs ``i < j`` are computed, and mirrored,
+and the diagonal is 0. Requires ``n1 == n2``.
 
 **Returns:**
 
@@ -121,7 +124,7 @@ alignment always exists. Negative values disable the band.
 ### `soft_dtw_batch`
 
 ```python
-soft_dtw_batch(distances, sx=None, sy=None, *, gamma=1.0, bandwidth=-1)
+soft_dtw_batch(distances, sx=None, sy=None, *, gamma=1.0, bandwidth=-1, symmetric=False)
 ```
 
 Compute the soft-DTW cost between all pairs of sequences of two batches, on the ``distances`` 4D tensor.
@@ -138,6 +141,10 @@ batches of sequences. Must have a floating dtype.
 - **sy** (<code>Tensor | None</code>) – An optional 1D integer tensor of shape (n2,) with the lengths of the second batch. Defaults to s2.
 - **gamma** (<code>float</code>) – The smoothing parameter, positive.
 - **bandwidth** (<code>int</code>) – Width of the Sakoe-Chiba band, as in ``soft_dtw``. Negative values disable the band.
+- **symmetric** (<code>bool</code>) – Whether the two batches are the same: only the pairs ``i <= j`` are computed, from the blocks
+``distances[i, j]``, and mirrored. The blocks ``i > j`` are not read and get no gradient. Unlike in
+``dtw_batch``, the diagonal is computed: the soft-DTW cost of a sequence with itself is not 0. Requires
+``n1 == n2``.
 
 **Returns:**
 

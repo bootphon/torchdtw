@@ -101,13 +101,7 @@ __global__ void dtw_kernel(
   const int32_t row = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
   int32_t x, y;
   if (symmetric) {
-    const int32_t b = row;
-    y = static_cast<int32_t>((1.0f + sqrtf(1.0f + 8.0f * static_cast<float>(b))) / 2.0f);
-    while (static_cast<int64_t>(y) * (y - 1) / 2 > b)
-      y--;
-    while (static_cast<int64_t>(y + 1) * y / 2 <= b)
-      y++;
-    x = b - y * (y - 1) / 2;
+    upper_triangle_pair(row, false, x, y);
   } else {
     x = row;
     y = blockIdx.y;
@@ -210,11 +204,7 @@ Tensor dtw_pairs_cuda(
   STD_TORCH_CHECK(
       max_x + max_y - 1 <= std::numeric_limits<uint16_t>::max(),
       "Sum of sequence lengths exceeds uint16_t path-length capacity");
-  constexpr int64_t max_grid_x = 2147483647; // 2^31 - 1
-  STD_TORCH_CHECK(
-      !symmetric || nx * (nx - 1) / 2 <= max_grid_x,
-      "symmetric dtw_batch too large: nx*(nx-1)/2 exceeds the CUDA grid limit");
-  const dim3 num_blocks = symmetric ? dim3(static_cast<unsigned int>(nx * (nx - 1) / 2)) : pair_grid(nx, ny);
+  const dim3 num_blocks = symmetric ? upper_triangle_grid(nx, false) : pair_grid(nx, ny);
 
   Tensor out =
       symmetric ? torch::stable::new_zeros(distances, {nx, ny}) : torch::stable::new_empty(distances, {nx, ny});
@@ -227,19 +217,10 @@ Tensor dtw_pairs_cuda(
   return out;
 }
 
-Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+Tensor dtw_batch_cuda(
+    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, bool symmetric) {
   STD_TORCH_CHECK(distances.dim() == 4, "distances must be a 4D tensor");
-  STD_TORCH_CHECK(sx.dim() == 1 && sy.dim() == 1, "sx and sy must be 1D tensors");
-  STD_TORCH_CHECK(sx.is_cuda() && sy.is_cuda(), "sx and sy must be on CUDA");
-  STD_TORCH_CHECK(
-      sx.get_device() == distances.get_device() && sy.get_device() == distances.get_device(),
-      "sx and sy must be on the same CUDA device as distances");
-  STD_TORCH_CHECK(
-      sx.size(0) == distances.size(0) && sy.size(0) == distances.size(1),
-      "sx and sy sizes must match the first two dimensions of distances");
-  STD_TORCH_CHECK(
-      is_lengths_dtype(sx.scalar_type()) && is_lengths_dtype(sy.scalar_type()), "sx and sy must have an integer dtype");
-  STD_TORCH_CHECK(sy.scalar_type() == sx.scalar_type(), "sx and sy dtypes do not match");
+  check_lengths_tensors(distances, sx, sy, distances.size(0), distances.size(1));
   return dtw_pairs_cuda(distances, sx, sy, symmetric);
 }
 

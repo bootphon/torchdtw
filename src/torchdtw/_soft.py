@@ -20,14 +20,15 @@ def _soft_dtw(
     *,
     gamma: float,
     bandwidth: int,
+    symmetric: bool,
 ) -> torch.Tensor:
     if distances.ndim != ndim:
         raise RankError(ndim, distances.ndim)
     check_no_cuda_on_windows(distances)
     if torch.is_grad_enabled() and distances.requires_grad:
-        return _SoftDTW.apply(distances, sx, sy, gamma, bandwidth)
+        return _SoftDTW.apply(distances, sx, sy, gamma, bandwidth, symmetric)
     # Without a backward pass, skip the autograd overhead and do not keep R, which only the backward pass reads.
-    cost, _ = torch.ops.torchdtw.soft_dtw.default(distances, sx, sy, gamma, bandwidth, keep_R=False)
+    cost, _ = torch.ops.torchdtw.soft_dtw.default(distances, sx, sy, gamma, bandwidth, symmetric, keep_R=False)
     return cost
 
 
@@ -58,7 +59,7 @@ def soft_dtw(
         alignment always exists. Negative values disable the band.
     :returns: A 1D tensor of shape (B,) with the costs.
     """
-    return _soft_dtw(distances, 3, sx, sy, gamma=gamma, bandwidth=bandwidth)
+    return _soft_dtw(distances, 3, sx, sy, gamma=gamma, bandwidth=bandwidth, symmetric=False)
 
 
 def soft_dtw_batch(
@@ -68,6 +69,7 @@ def soft_dtw_batch(
     *,
     gamma: float = 1.0,
     bandwidth: int = -1,
+    symmetric: bool = False,
 ) -> torch.Tensor:
     """Compute the soft-DTW cost between all pairs of sequences of two batches, on the ``distances`` 4D tensor.
 
@@ -81,9 +83,13 @@ def soft_dtw_batch(
     :param sy: An optional 1D integer tensor of shape (n2,) with the lengths of the second batch. Defaults to s2.
     :param gamma: The smoothing parameter, positive.
     :param bandwidth: Width of the Sakoe-Chiba band, as in ``soft_dtw``. Negative values disable the band.
+    :param symmetric: Whether the two batches are the same: only the pairs ``i <= j`` are computed, from the blocks
+        ``distances[i, j]``, and mirrored. The blocks ``i > j`` are not read and get no gradient. Unlike in
+        ``dtw_batch``, the diagonal is computed: the soft-DTW cost of a sequence with itself is not 0. Requires
+        ``n1 == n2``.
     :returns: A 2D tensor of shape (n1, n2) with the costs.
     """
-    return _soft_dtw(distances, 4, sx, sy, gamma=gamma, bandwidth=bandwidth)
+    return _soft_dtw(distances, 4, sx, sy, gamma=gamma, bandwidth=bandwidth, symmetric=symmetric)
 
 
 @torch.library.register_fake("torchdtw::soft_dtw")
@@ -93,6 +99,7 @@ def _(
     sy: torch.Tensor | None,  # noqa: ARG001
     gamma: float,  # noqa: ARG001
     bandwidth: int,  # noqa: ARG001
+    symmetric: bool,  # noqa: ARG001, FBT001
     keep_R: bool,  # noqa: FBT001
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Register the FakeTensor kernel for soft_dtw, for compatibility with torch.compile."""
@@ -111,6 +118,7 @@ def _(
     sx: torch.Tensor | None,  # noqa: ARG001
     sy: torch.Tensor | None,  # noqa: ARG001
     gamma: float,  # noqa: ARG001
+    symmetric: bool,  # noqa: ARG001, FBT001
 ) -> torch.Tensor:
     """Register the FakeTensor kernel for soft_dtw_backward, for compatibility with torch.compile."""
     return distances.new_empty(distances.shape)
@@ -132,14 +140,18 @@ class _SoftDTW(torch.autograd.Function):
         sy: torch.Tensor | None,
         gamma: float,
         bandwidth: int,
+        symmetric: bool,  # noqa: FBT001
     ) -> torch.Tensor:
-        cost, R = torch.ops.torchdtw.soft_dtw.default(distances, sx, sy, gamma, bandwidth, keep_R=True)
+        cost, R = torch.ops.torchdtw.soft_dtw.default(distances, sx, sy, gamma, bandwidth, symmetric, keep_R=True)
         ctx.save_for_backward(distances, R, sx, sy)
         ctx.gamma = gamma
+        ctx.symmetric = symmetric
         return cost
 
     @staticmethod
     def backward(ctx: torch.autograd.function.FunctionCtx, grad: torch.Tensor) -> tuple:
         distances, R, sx, sy = ctx.saved_tensors
-        grad_distances = torch.ops.torchdtw.soft_dtw_backward.default(grad, distances, R, sx, sy, ctx.gamma)
-        return grad_distances, None, None, None, None
+        grad_distances = torch.ops.torchdtw.soft_dtw_backward.default(
+            grad, distances, R, sx, sy, ctx.gamma, ctx.symmetric
+        )
+        return grad_distances, None, None, None, None, None

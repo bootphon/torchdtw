@@ -156,22 +156,9 @@ void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Lengths sx, 
   }
 
   if (symmetric) {
-    // Row i owns the pairs j > i, so a row-parallel split hands row 0 (ny-1 DTWs) and
-    // row nx-1 (none) wildly uneven work. Flatten the upper triangle into a single pair
-    // index b = j*(j-1)/2 + i (0 <= i < j) and parallelize over that, so every worker gets
-    // an equal count of pairs regardless of which rows they fall in.
-    const int64_t num_pairs = nx * (nx - 1) / 2;
-    torch::stable::parallel_for(0, num_pairs, 1, [&](int64_t start, int64_t end) {
+    torch::stable::parallel_for(0, nx * (nx - 1) / 2, 1, [&](int64_t start, int64_t end) {
       std::vector<acc_t<distances_t>> workspace;
-      // Seek (i, j) for flat index `start` via the triangular-number inverse, corrected with
-      // integer steps to absorb double rounding; then advance incrementally to avoid a sqrt per pair.
-      int64_t j = static_cast<int64_t>((1.0 + std::sqrt(1.0 + 8.0 * static_cast<double>(start))) / 2.0);
-      while (j > 0 && j * (j - 1) / 2 > start)
-        j--;
-      while ((j + 1) * j / 2 <= start)
-        j++;
-      int64_t i = start - j * (j - 1) / 2;
-      for (int64_t b = start; b < end; b++) {
+      for_upper_triangle(start, end, false, [&](int64_t i, int64_t j) {
         const int64_t N = sx[i];
         const int64_t M = sy[j];
         if (N > 0 && M > 0) {
@@ -179,11 +166,7 @@ void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Lengths sx, 
           out_a[i][j] = value;
           out_a[j][i] = value;
         }
-        if (++i == j) {
-          i = 0;
-          j++;
-        }
-      }
+      });
     });
   } else {
     // Each row does exactly ny pairs, so a row-parallel split is already balanced.
@@ -202,19 +185,14 @@ void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Lengths sx, 
   }
 }
 
-Tensor dtw_batch_cpu(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+Tensor dtw_batch_cpu(
+    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, bool symmetric) {
   STD_TORCH_CHECK(distances.dim() == 4, "distances must be a 4D tensor");
-  STD_TORCH_CHECK(sx.dim() == 1 && sy.dim() == 1, "sx and sy must be 1D tensors");
-  STD_TORCH_CHECK(
-      sx.size(0) == distances.size(0) && sy.size(0) == distances.size(1),
-      "sx and sy sizes must match the first two dimensions of distances");
+  check_lengths_tensors(distances, sx, sy, distances.size(0), distances.size(1));
   STD_TORCH_CHECK(
       !symmetric || distances.size(0) == distances.size(1),
       "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
   Tensor out = torch::stable::new_zeros(distances, {distances.size(0), distances.size(1)});
-  STD_TORCH_CHECK(
-      is_lengths_dtype(sx.scalar_type()) && is_lengths_dtype(sy.scalar_type()), "sx and sy must have an integer dtype");
-  STD_TORCH_CHECK(sy.scalar_type() == sx.scalar_type(), "sy dtype does not match sx dtype");
   dispatch_dtw(distances.scalar_type(), [&]<typename distances_t>() {
     dtw_batch_cpu_impl<distances_t>(
         out, distances, make_lengths(sx, distances.size(2)), make_lengths(sy, distances.size(3)), symmetric);
@@ -225,7 +203,7 @@ Tensor dtw_batch_cpu(const Tensor& distances, const Tensor& sx, const Tensor& sy
 STABLE_TORCH_LIBRARY(torchdtw, m) {
   m.def("dtw(Tensor distances) -> Tensor");
   m.def("dtw_path(Tensor distances) -> Tensor");
-  m.def("dtw_batch(Tensor distances, Tensor sx, Tensor sy, bool symmetric) -> Tensor");
+  m.def("dtw_batch(Tensor distances, Tensor? sx, Tensor? sy, bool symmetric) -> Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(torchdtw, CPU, m) {
