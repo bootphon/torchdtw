@@ -57,37 +57,33 @@ compute_dtw_cost(const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N
   fill_grid(HardCell<scalar_t>(distances_a), N, M, cost, M);
 }
 
-template <typename cost_t>
-static std::vector<std::pair<int64_t, int64_t>> compute_dtw_path(const cost_t* cost, int64_t N, int64_t M) {
-  std::vector<std::pair<int64_t, int64_t>> path;
-  path.reserve(N + M - 1);
+// Walks the DTW path back from (N - 1, M - 1) to (0, 0) through the accumulated costs, calling visit(i, j) on
+// each of its cells. Ties prefer the diagonal, then the left parent.
+template <typename cost_t, typename Visit>
+static void trace_dtw_path(const cost_t* cost, int64_t N, int64_t M, Visit&& visit) {
   int64_t i = N - 1;
   int64_t j = M - 1;
-  path.push_back({i, j});
-  while (i > 0 && j > 0) {
-    const cost_t c_up = cost[(i - 1) * M + j];
-    const cost_t c_left = cost[i * M + j - 1];
-    const cost_t c_diag = cost[(i - 1) * M + j - 1];
-    if (c_diag <= c_left && c_diag <= c_up) {
+  visit(i, j);
+  while (i > 0 || j > 0) {
+    if (i == 0) {
+      j--;
+    } else if (j == 0) {
       i--;
-      j--;
-    } else if (c_left <= c_up) {
-      j--;
     } else {
-      i--;
+      const cost_t c_up = cost[(i - 1) * M + j];
+      const cost_t c_left = cost[i * M + j - 1];
+      const cost_t c_diag = cost[(i - 1) * M + j - 1];
+      if (c_diag <= c_left && c_diag <= c_up) {
+        i--;
+        j--;
+      } else if (c_left <= c_up) {
+        j--;
+      } else {
+        i--;
+      }
     }
-    path.push_back({i, j});
+    visit(i, j);
   }
-  while (i > 0) {
-    i--;
-    path.push_back({i, j});
-  }
-  while (j > 0) {
-    j--;
-    path.push_back({i, j});
-  }
-  std::reverse(path.begin(), path.end());
-  return path;
 }
 
 template <typename scalar_t>
@@ -99,13 +95,14 @@ static scalar_t compute_dtw_value(
     workspace.resize(N * M);
   }
   compute_dtw_cost<scalar_t>(distances_a, N, M, workspace.data());
-  const auto path = compute_dtw_path<acc>(workspace.data(), N, M);
+  int64_t path_len = 0;
+  trace_dtw_path(workspace.data(), N, M, [&](int64_t, int64_t) { path_len++; });
   // For integral dtypes divide in int64: casting the path length to a narrow dtype
   // can yield 0 (e.g. 256 as int8) and trap on integer division by zero.
   if constexpr (std::is_integral_v<scalar_t>) {
-    return static_cast<scalar_t>(workspace[N * M - 1] / static_cast<int64_t>(path.size()));
+    return static_cast<scalar_t>(workspace[N * M - 1] / path_len);
   } else {
-    return static_cast<scalar_t>(workspace[N * M - 1] / static_cast<acc>(path.size()));
+    return static_cast<scalar_t>(workspace[N * M - 1] / static_cast<acc>(path_len));
   }
 }
 
@@ -142,11 +139,13 @@ Tensor dtw_path_cpu(const Tensor& distances) {
       AT_WRAP([&] {
         std::vector<acc_t<scalar_t>> cost(N * M);
         compute_dtw_cost<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, cost.data());
-        path = compute_dtw_path<acc_t<scalar_t>>(cost.data(), N, M);
+        path.reserve(N + M - 1);
+        trace_dtw_path(cost.data(), N, M, [&](int64_t i, int64_t j) { path.push_back({i, j}); });
       }),
       AT_ALL_TYPES,
       torch::headeronly::ScalarType::Half,
       torch::headeronly::ScalarType::BFloat16);
+  std::reverse(path.begin(), path.end());
   Tensor out = torch::stable::new_empty(distances, {(int64_t)path.size(), 2}, torch::headeronly::ScalarType::Long);
   std::memcpy(
       reinterpret_cast<int64_t*>(out.data_ptr()),
@@ -231,23 +230,9 @@ Tensor dtw_batch_cpu(const Tensor& distances, const Tensor& sx, const Tensor& sy
       !symmetric || distances.size(0) == distances.size(1),
       "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
   Tensor out = torch::stable::new_zeros(distances, {distances.size(0), distances.size(1)});
-  THO_DISPATCH_V2(
-      distances.scalar_type(),
-      "dtw_batch_cpu_impl",
-      AT_WRAP([&] {
-        using distances_t = scalar_t;
-        THO_DISPATCH_V2(
-            sx.scalar_type(),
-            "dtw_batch_cpu_impl_2",
-            AT_WRAP([&] {
-              using sx_t = scalar_t;
-              (dtw_batch_cpu_impl<distances_t, sx_t>(out, distances, sx, sy, symmetric));
-            }),
-            AT_INTEGRAL_TYPES_V2);
-      }),
-      AT_ALL_TYPES,
-      torch::headeronly::ScalarType::Half,
-      torch::headeronly::ScalarType::BFloat16);
+  dispatch_dtw(distances.scalar_type(), sx.scalar_type(), [&]<typename distances_t, typename sx_t>() {
+    dtw_batch_cpu_impl<distances_t, sx_t>(out, distances, sx, sy, symmetric);
+  });
   return out;
 }
 

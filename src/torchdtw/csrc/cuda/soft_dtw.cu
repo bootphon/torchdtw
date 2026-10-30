@@ -4,7 +4,6 @@
 #include <optional>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
-#include <torch/headeronly/core/Dispatch_v2.h>
 #include <tuple>
 
 namespace torchdtw {
@@ -217,11 +216,7 @@ template <typename acc_t> SoftLaunch soft_dtw_launch(const Tensor& pairs) {
   const int64_t n2 = pairs.size(1);
   const int64_t s1 = pairs.size(2);
   const int64_t s2 = pairs.size(3);
-  constexpr int64_t max_grid_x = 2147483647; // 2^31 - 1
-  constexpr int64_t max_grid_y = 65535;
-  STD_TORCH_CHECK(n1 <= max_grid_x, "distances.size(0) exceeds the CUDA grid limit of 2^31-1");
-  STD_TORCH_CHECK(n2 <= max_grid_y, "distances.size(1) exceeds the CUDA grid limit of 65535");
-  const dim3 num_blocks(static_cast<unsigned int>(n1), static_cast<unsigned int>(n2));
+  const dim3 num_blocks = pair_grid(n1, n2);
   return {num_blocks,
           wavefront_threads(s1, s2, num_blocks.x),
           3 * static_cast<size_t>(s2) * sizeof(acc_t),
@@ -242,11 +237,11 @@ void soft_dtw_cuda_impl(
   launch_wavefront(
       pairs, storage, launch.num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
         constexpr bool kGlobal = decltype(global)::value;
-        if (launch.needs_64bit) {
-          soft_dtw_kernel<distances_t, sx_t, int64_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
+        dispatch_index(launch.needs_64bit, [&]<typename index_t>() {
+          soft_dtw_kernel<distances_t, sx_t, index_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
               packed_accessor32<distances_t, 2>(out),
               R_data,
-              packed_accessor64<distances_t, 4>(pairs),
+              packed_accessor<distances_t, 4, index_t>(pairs),
               sx_l,
               sy_l,
               paired,
@@ -255,20 +250,7 @@ void soft_dtw_cuda_impl(
               scratch,
               storage.scratch_stride,
               x0);
-        } else {
-          soft_dtw_kernel<distances_t, sx_t, int32_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
-              packed_accessor32<distances_t, 2>(out),
-              R_data,
-              packed_accessor32<distances_t, 4>(pairs),
-              sx_l,
-              sy_l,
-              paired,
-              static_cast<acc_t>(gamma),
-              bandwidth,
-              scratch,
-              storage.scratch_stride,
-              x0);
-        }
+        });
         check_launch("soft_dtw_kernel");
       });
 }
@@ -289,12 +271,12 @@ void soft_dtw_backward_cuda_impl(
   launch_wavefront(
       pairs, storage, launch.num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
         constexpr bool kGlobal = decltype(global)::value;
-        if (launch.needs_64bit) {
-          soft_dtw_backward_kernel<distances_t, sx_t, int64_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
+        dispatch_index(launch.needs_64bit, [&]<typename index_t>() {
+          soft_dtw_backward_kernel<distances_t, sx_t, index_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
               out,
               packed_accessor32<distances_t, 2>(grad),
               R_data,
-              packed_accessor64<distances_t, 4>(pairs),
+              packed_accessor<distances_t, 4, index_t>(pairs),
               sx_l,
               sy_l,
               paired,
@@ -302,20 +284,7 @@ void soft_dtw_backward_cuda_impl(
               scratch,
               storage.scratch_stride,
               x0);
-        } else {
-          soft_dtw_backward_kernel<distances_t, sx_t, int32_t, kGlobal><<<grid, launch.num_threads, smem, stream>>>(
-              out,
-              packed_accessor32<distances_t, 2>(grad),
-              R_data,
-              packed_accessor32<distances_t, 4>(pairs),
-              sx_l,
-              sy_l,
-              paired,
-              inv_gamma,
-              scratch,
-              storage.scratch_stride,
-              x0);
-        }
+        });
         check_launch("soft_dtw_backward_kernel");
       });
 }
@@ -323,76 +292,44 @@ void soft_dtw_backward_cuda_impl(
 std::tuple<Tensor, Tensor> soft_dtw_cuda(
     const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, double gamma,
     int64_t bandwidth, bool keep_R) {
-  const torch::headeronly::ScalarType lengths_dtype = check_soft_dtw_inputs(distances, sx, sy, gamma);
-  const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
-  const bool paired = distances.dim() == 3;
-  const Tensor pairs = as_all_pairs(distances);
-  Tensor out = torch::stable::new_empty(distances, {pairs.size(0), pairs.size(1)});
-  const auto acc_dtype = acc_scalar_type(distances.scalar_type());
-  Tensor R = keep_R ? torch::stable::new_empty(distances, distances.sizes(), acc_dtype)
-                    : torch::stable::new_empty(distances, {0}, acc_dtype);
-  if (pairs.numel() == 0) {
-    // No cell to compute: every pair is empty.
-    torch::stable::fill_(out, 0);
-  } else {
-    THO_DISPATCH_V2(
-        distances.scalar_type(),
-        "soft_dtw_cuda",
-        AT_WRAP([&] {
-          using distances_t = scalar_t;
-          THO_DISPATCH_V2(
-              lengths_dtype,
-              "soft_dtw_cuda_2",
-              AT_WRAP([&] {
-                using sx_t = scalar_t;
-                (soft_dtw_cuda_impl<distances_t, sx_t>(out, R, keep_R, pairs, sx, sy, paired, gamma, bandwidth));
-              }),
-              AT_INTEGRAL_TYPES_V2);
-        }),
-        AT_FLOATING_TYPES,
-        torch::headeronly::ScalarType::Half,
-        torch::headeronly::ScalarType::BFloat16);
-  }
-  if (paired)
-    out = torch::stable::view(out, {pairs.size(0)});
-  return {out, R};
+  return soft_dtw_op(
+      distances,
+      sx,
+      sy,
+      gamma,
+      keep_R,
+      [&]<typename distances_t, typename sx_t>(Tensor& out, Tensor& R, const Tensor& pairs, bool paired) {
+        if (pairs.numel() == 0) {
+          // No cell to compute: every pair is empty.
+          torch::stable::fill_(out, 0);
+          return;
+        }
+        const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
+        soft_dtw_cuda_impl<distances_t, sx_t>(out, R, keep_R, pairs, sx, sy, paired, gamma, bandwidth);
+      });
 }
 
 Tensor soft_dtw_backward_cuda(
     const Tensor& grad, const Tensor& distances, const Tensor& R, const std::optional<Tensor>& sx,
     const std::optional<Tensor>& sy, double gamma) {
-  const torch::headeronly::ScalarType lengths_dtype = check_soft_dtw_inputs(distances, sx, sy, gamma);
-  check_soft_dtw_backward_inputs(grad, distances, R);
-  STD_TORCH_CHECK(
-      grad.is_cuda() && R.is_cuda() && grad.get_device() == distances.get_device() &&
-          R.get_device() == distances.get_device(),
-      "grad and R must be on the same CUDA device as distances");
-  const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
-  const bool paired = distances.dim() == 3;
-  const Tensor pairs = as_all_pairs(distances);
-  const Tensor grad_pairs = paired ? torch::stable::view(grad, {pairs.size(0), 1}) : grad;
-  Tensor grad_distances = torch::stable::new_empty(distances, distances.sizes());
-  if (pairs.numel() == 0)
-    return grad_distances;
-  THO_DISPATCH_V2(
-      distances.scalar_type(),
-      "soft_dtw_backward_cuda",
-      AT_WRAP([&] {
-        using distances_t = scalar_t;
-        THO_DISPATCH_V2(
-            lengths_dtype,
-            "soft_dtw_backward_cuda_2",
-            AT_WRAP([&] {
-              using sx_t = scalar_t;
-              (soft_dtw_backward_cuda_impl<distances_t, sx_t>(
-                  grad_distances, grad_pairs, pairs, R, sx, sy, paired, gamma));
-            }),
-            AT_INTEGRAL_TYPES_V2);
-      }),
-      AT_FLOATING_TYPES,
-      torch::headeronly::ScalarType::Half,
-      torch::headeronly::ScalarType::BFloat16);
-  return grad_distances;
+  return soft_dtw_backward_op(
+      grad,
+      distances,
+      R,
+      sx,
+      sy,
+      gamma,
+      [&]<typename distances_t, typename sx_t>(
+          Tensor& grad_distances, const Tensor& grad_pairs, const Tensor& pairs, bool paired) {
+        STD_TORCH_CHECK(
+            grad.is_cuda() && R.is_cuda() && grad.get_device() == distances.get_device() &&
+                R.get_device() == distances.get_device(),
+            "grad and R must be on the same CUDA device as distances");
+        if (pairs.numel() == 0)
+          return;
+        const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
+        soft_dtw_backward_cuda_impl<distances_t, sx_t>(grad_distances, grad_pairs, pairs, R, sx, sy, paired, gamma);
+      });
 }
 
 STABLE_TORCH_LIBRARY_IMPL(torchdtw, CUDA, m) {

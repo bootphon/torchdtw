@@ -3,7 +3,6 @@
 #include <cmath>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
-#include <torch/headeronly/core/Dispatch_v2.h>
 #include <torch/headeronly/util/Exception.h>
 #include <tuple>
 #include <vector>
@@ -196,63 +195,31 @@ void soft_dtw_backward_cpu_impl(
 std::tuple<Tensor, Tensor> soft_dtw_cpu(
     const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, double gamma,
     int64_t bandwidth, bool keep_R) {
-  const torch::headeronly::ScalarType lengths_dtype = check_soft_dtw_inputs(distances, sx, sy, gamma);
-  const bool paired = distances.dim() == 3;
-  const Tensor pairs = as_all_pairs(distances);
-  Tensor out = torch::stable::new_empty(distances, {pairs.size(0), pairs.size(1)});
-  const auto acc_dtype = acc_scalar_type(distances.scalar_type());
-  Tensor R = keep_R ? torch::stable::new_empty(distances, distances.sizes(), acc_dtype)
-                    : torch::stable::new_empty(distances, {0}, acc_dtype);
-  THO_DISPATCH_V2(
-      distances.scalar_type(),
-      "soft_dtw_cpu",
-      AT_WRAP([&] {
-        using distances_t = scalar_t;
-        THO_DISPATCH_V2(
-            lengths_dtype,
-            "soft_dtw_cpu_2",
-            AT_WRAP([&] {
-              using sx_t = scalar_t;
-              (soft_dtw_cpu_impl<distances_t, sx_t>(out, R, keep_R, pairs, sx, sy, paired, gamma, bandwidth));
-            }),
-            AT_INTEGRAL_TYPES_V2);
-      }),
-      AT_FLOATING_TYPES,
-      torch::headeronly::ScalarType::Half,
-      torch::headeronly::ScalarType::BFloat16);
-  if (paired)
-    out = torch::stable::view(out, {pairs.size(0)});
-  return {out, R};
+  return soft_dtw_op(
+      distances,
+      sx,
+      sy,
+      gamma,
+      keep_R,
+      [&]<typename distances_t, typename sx_t>(Tensor& out, Tensor& R, const Tensor& pairs, bool paired) {
+        soft_dtw_cpu_impl<distances_t, sx_t>(out, R, keep_R, pairs, sx, sy, paired, gamma, bandwidth);
+      });
 }
 
 Tensor soft_dtw_backward_cpu(
     const Tensor& grad, const Tensor& distances, const Tensor& R, const std::optional<Tensor>& sx,
     const std::optional<Tensor>& sy, double gamma) {
-  const torch::headeronly::ScalarType lengths_dtype = check_soft_dtw_inputs(distances, sx, sy, gamma);
-  check_soft_dtw_backward_inputs(grad, distances, R);
-  const bool paired = distances.dim() == 3;
-  const Tensor pairs = as_all_pairs(distances);
-  const Tensor grad_pairs = paired ? torch::stable::view(grad, {pairs.size(0), 1}) : grad;
-  Tensor grad_distances = torch::stable::new_empty(distances, distances.sizes());
-  THO_DISPATCH_V2(
-      distances.scalar_type(),
-      "soft_dtw_backward_cpu",
-      AT_WRAP([&] {
-        using distances_t = scalar_t;
-        THO_DISPATCH_V2(
-            lengths_dtype,
-            "soft_dtw_backward_cpu_2",
-            AT_WRAP([&] {
-              using sx_t = scalar_t;
-              (soft_dtw_backward_cpu_impl<distances_t, sx_t>(
-                  grad_distances, grad_pairs, pairs, R, sx, sy, paired, gamma));
-            }),
-            AT_INTEGRAL_TYPES_V2);
-      }),
-      AT_FLOATING_TYPES,
-      torch::headeronly::ScalarType::Half,
-      torch::headeronly::ScalarType::BFloat16);
-  return grad_distances;
+  return soft_dtw_backward_op(
+      grad,
+      distances,
+      R,
+      sx,
+      sy,
+      gamma,
+      [&]<typename distances_t, typename sx_t>(
+          Tensor& grad_distances, const Tensor& grad_pairs, const Tensor& pairs, bool paired) {
+        soft_dtw_backward_cpu_impl<distances_t, sx_t>(grad_distances, grad_pairs, pairs, R, sx, sy, paired, gamma);
+      });
 }
 
 STABLE_TORCH_LIBRARY_FRAGMENT(torchdtw, m) {

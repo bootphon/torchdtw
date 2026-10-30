@@ -5,7 +5,6 @@
 #include <optional>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
-#include <torch/headeronly/core/Dispatch_v2.h>
 #include <type_traits>
 
 #ifdef USE_ROCM
@@ -98,8 +97,8 @@ template <typename acc_t, typename distances_t> struct HardCell {
 template <typename scalar_t, typename sx_t, typename index_t, bool global>
 __global__ void dtw_kernel(
     PackedTensorAccessor32<scalar_t, 2> out, const PackedTensorAccessor<scalar_t, 4, index_t> distances,
-    const PackedTensorAccessor32<sx_t, 1> sx, const PackedTensorAccessor32<sx_t, 1> sy, bool symmetric,
-    unsigned char* scratch, size_t scratch_stride, int64_t x0) {
+    const Lengths<sx_t> sx, const Lengths<sx_t> sy, bool symmetric, unsigned char* scratch, size_t scratch_stride,
+    int64_t x0) {
   const int32_t row = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
   int32_t x, y;
   if (symmetric) {
@@ -163,13 +162,14 @@ __global__ void dtw_kernel(
 }
 
 template <typename distances_t, typename sx_t>
-void dtw_batch_cuda_impl(Tensor& out, const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+void dtw_batch_cuda_impl(
+    Tensor& out, const Tensor& distances, const Lengths<sx_t> sx, const Lengths<sx_t> sy, bool symmetric,
+    dim3 num_blocks) {
   const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
   const int64_t nx = distances.size(0);
   const int64_t ny = distances.size(1);
   const int64_t max_x = distances.size(2);
   const int64_t max_y = distances.size(3);
-  const dim3 num_blocks = symmetric ? dim3(static_cast<unsigned int>(nx * (nx - 1) / 2)) : dim3(nx, ny);
   const int num_threads = wavefront_threads(max_x, max_y, num_blocks.x);
   const bool needs_64bit = nx * ny * max_x * max_y > std::numeric_limits<int32_t>::max();
   using acc_t = torchdtw::acc_t<distances_t>;
@@ -184,95 +184,69 @@ void dtw_batch_cuda_impl(Tensor& out, const Tensor& distances, const Tensor& sx,
   launch_wavefront(
       distances, storage, num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
         constexpr bool kGlobal = decltype(global)::value;
-        if (needs_64bit) {
-          dtw_kernel<distances_t, sx_t, int64_t, kGlobal><<<grid, num_threads, smem, stream>>>(
+        dispatch_index(needs_64bit, [&]<typename index_t>() {
+          dtw_kernel<distances_t, sx_t, index_t, kGlobal><<<grid, num_threads, smem, stream>>>(
               packed_accessor32<distances_t, 2>(out),
-              packed_accessor64<distances_t, 4>(distances),
-              packed_accessor32<sx_t, 1>(sx),
-              packed_accessor32<sx_t, 1>(sy),
+              packed_accessor<distances_t, 4, index_t>(distances),
+              sx,
+              sy,
               symmetric,
               scratch,
               storage.scratch_stride,
               x0);
-        } else {
-          dtw_kernel<distances_t, sx_t, int32_t, kGlobal><<<grid, num_threads, smem, stream>>>(
-              packed_accessor32<distances_t, 2>(out),
-              packed_accessor32<distances_t, 4>(distances),
-              packed_accessor32<sx_t, 1>(sx),
-              packed_accessor32<sx_t, 1>(sy),
-              symmetric,
-              scratch,
-              storage.scratch_stride,
-              x0);
-        }
+        });
         check_launch("dtw_kernel");
       });
 }
 
-Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
-  STD_TORCH_CHECK(distances.dim() == 4, "distances must be a 4D tensor");
-
+// DTW of each pair of the 4D distances, with lengths sx and sy, which default to the padded sizes when absent.
+Tensor dtw_pairs_cuda(
+    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, bool symmetric,
+    torch::headeronly::ScalarType lengths_dtype) {
   const int64_t nx = distances.size(0);
   const int64_t ny = distances.size(1);
   const int64_t max_x = distances.size(2);
   const int64_t max_y = distances.size(3);
+  STD_TORCH_CHECK(!symmetric || nx == ny, "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
+  STD_TORCH_CHECK(nx > 0 && ny > 0 && max_x > 0 && max_y > 0, "Empty input tensor");
+  STD_TORCH_CHECK(
+      max_x + max_y - 1 <= std::numeric_limits<uint16_t>::max(),
+      "Sum of sequence lengths exceeds uint16_t path-length capacity");
+  constexpr int64_t max_grid_x = 2147483647; // 2^31 - 1
+  STD_TORCH_CHECK(
+      !symmetric || nx * (nx - 1) / 2 <= max_grid_x,
+      "symmetric dtw_batch too large: nx*(nx-1)/2 exceeds the CUDA grid limit");
+  const dim3 num_blocks = symmetric ? dim3(static_cast<unsigned int>(nx * (nx - 1) / 2)) : pair_grid(nx, ny);
 
+  Tensor out =
+      symmetric ? torch::stable::new_zeros(distances, {nx, ny}) : torch::stable::new_empty(distances, {nx, ny});
+  if (symmetric && nx <= 1)
+    return out;
+  dispatch_dtw(distances.scalar_type(), lengths_dtype, [&]<typename distances_t, typename sx_t>() {
+    dtw_batch_cuda_impl<distances_t, sx_t>(
+        out, distances, make_lengths<sx_t>(sx, max_x), make_lengths<sx_t>(sy, max_y), symmetric, num_blocks);
+  });
+  return out;
+}
+
+Tensor dtw_batch_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+  STD_TORCH_CHECK(distances.dim() == 4, "distances must be a 4D tensor");
   STD_TORCH_CHECK(sx.dim() == 1 && sy.dim() == 1, "sx and sy must be 1D tensors");
   STD_TORCH_CHECK(sx.is_cuda() && sy.is_cuda(), "sx and sy must be on CUDA");
   STD_TORCH_CHECK(
       sx.get_device() == distances.get_device() && sy.get_device() == distances.get_device(),
       "sx and sy must be on the same CUDA device as distances");
   STD_TORCH_CHECK(
-      sx.size(0) == nx && sy.size(0) == ny, "sx and sy sizes must match the first two dimensions of distances");
-  STD_TORCH_CHECK(!symmetric || nx == ny, "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
-  STD_TORCH_CHECK(nx > 0 && ny > 0 && max_x > 0 && max_y > 0, "Empty input tensor");
-  STD_TORCH_CHECK(
-      max_x + max_y - 1 <= std::numeric_limits<uint16_t>::max(),
-      "Sum of sequence lengths exceeds uint16_t path-length capacity");
+      sx.size(0) == distances.size(0) && sy.size(0) == distances.size(1),
+      "sx and sy sizes must match the first two dimensions of distances");
   STD_TORCH_CHECK(sy.scalar_type() == sx.scalar_type(), "sx and sy dtypes do not match");
-  constexpr int64_t max_grid_x = 2147483647; // 2^31 - 1
-  constexpr int64_t max_grid_y = 65535;
-  if (symmetric) {
-    STD_TORCH_CHECK(
-        nx * (nx - 1) / 2 <= max_grid_x, "symmetric dtw_batch too large: nx*(nx-1)/2 exceeds the CUDA grid limit");
-  } else {
-    STD_TORCH_CHECK(nx <= max_grid_x, "distances.size(0) exceeds the CUDA grid limit of 2^31-1");
-    STD_TORCH_CHECK(ny <= max_grid_y, "distances.size(1) exceeds the CUDA grid limit of 65535");
-  }
-
-  Tensor out =
-      symmetric ? torch::stable::new_zeros(distances, {nx, ny}) : torch::stable::new_empty(distances, {nx, ny});
-  if (symmetric && nx <= 1)
-    return out;
-  THO_DISPATCH_V2(
-      distances.scalar_type(),
-      "dtw_batch_cuda_impl",
-      AT_WRAP([&] {
-        using distances_t = scalar_t;
-        THO_DISPATCH_V2(
-            sx.scalar_type(),
-            "dtw_batch_cuda_impl_2",
-            AT_WRAP([&] {
-              using sx_t = scalar_t;
-              (dtw_batch_cuda_impl<distances_t, sx_t>(out, distances, sx, sy, symmetric));
-            }),
-            AT_INTEGRAL_TYPES_V2);
-      }),
-      AT_ALL_TYPES,
-      torch::headeronly::ScalarType::Half,
-      torch::headeronly::ScalarType::BFloat16);
-  return out;
+  return dtw_pairs_cuda(distances, sx, sy, symmetric, sx.scalar_type());
 }
 
 Tensor dtw_cuda(const Tensor& distances) {
   STD_TORCH_CHECK(distances.dim() == 2, "distances must be a 2D tensor");
-  Tensor sxy = torch::stable::new_empty(distances, {2}, std::make_optional(torch::headeronly::ScalarType::Long));
-  Tensor sx = torch::stable::narrow(sxy, 0, 0, 1);
-  Tensor sy = torch::stable::narrow(sxy, 0, 1, 1);
-  torch::stable::fill_(sx, distances.size(0));
-  torch::stable::fill_(sy, distances.size(1));
-  Tensor result =
-      dtw_batch_cuda(torch::stable::view(distances, {1, 1, distances.size(0), distances.size(1)}), sx, sy, false);
+  const Tensor pairs = torch::stable::view(distances, {1, 1, distances.size(0), distances.size(1)});
+  const Tensor result = dtw_pairs_cuda(pairs, std::nullopt, std::nullopt, false, torch::headeronly::ScalarType::Long);
   return torch::stable::view(result, torch::headeronly::IntHeaderOnlyArrayRef());
 }
 

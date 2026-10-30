@@ -12,9 +12,22 @@ class RankError(RuntimeError):
         super().__init__(f"distances must be a {expected}D tensor, got {actual}D")
 
 
-def _keep_r(distances: torch.Tensor) -> bool:
-    """Whether the forward pass must keep its accumulated cost matrix R, which only the backward pass reads."""
-    return torch.is_grad_enabled() and distances.requires_grad
+def _soft_dtw(
+    distances: torch.Tensor,
+    ndim: int,
+    sx: torch.Tensor | None,
+    sy: torch.Tensor | None,
+    *,
+    gamma: float,
+    bandwidth: int,
+) -> torch.Tensor:
+    if distances.ndim != ndim:
+        raise RankError(ndim, distances.ndim)
+    check_no_cuda_on_windows(distances)
+    # Keep the accumulated cost matrix R only if the backward pass, its only reader, can run.
+    keep_r = torch.is_grad_enabled() and distances.requires_grad
+    cost, _ = torch.ops.torchdtw.soft_dtw.default(distances, sx, sy, gamma, bandwidth, keep_r)
+    return cost
 
 
 def soft_dtw(
@@ -44,11 +57,7 @@ def soft_dtw(
         alignment always exists. Negative values disable the band.
     :returns: A 1D tensor of shape (B,) with the costs.
     """
-    if distances.ndim != 3:
-        raise RankError(3, distances.ndim)
-    check_no_cuda_on_windows(distances)
-    cost, _ = torch.ops.torchdtw.soft_dtw.default(distances, sx, sy, gamma, bandwidth, _keep_r(distances))
-    return cost
+    return _soft_dtw(distances, 3, sx, sy, gamma=gamma, bandwidth=bandwidth)
 
 
 def soft_dtw_batch(
@@ -73,11 +82,7 @@ def soft_dtw_batch(
     :param bandwidth: Width of the Sakoe-Chiba band, as in ``soft_dtw``. Negative values disable the band.
     :returns: A 2D tensor of shape (n1, n2) with the costs.
     """
-    if distances.ndim != 4:
-        raise RankError(4, distances.ndim)
-    check_no_cuda_on_windows(distances)
-    cost, _ = torch.ops.torchdtw.soft_dtw.default(distances, sx, sy, gamma, bandwidth, _keep_r(distances))
-    return cost
+    return _soft_dtw(distances, 4, sx, sy, gamma=gamma, bandwidth=bandwidth)
 
 
 @torch.library.register_fake("torchdtw::soft_dtw")
@@ -121,11 +126,11 @@ def _setup_context(ctx: torch.autograd.function.FunctionCtx, inputs: tuple, outp
 
 
 def _backward(ctx: torch.autograd.function.FunctionCtx, grad: torch.Tensor | None, _: torch.Tensor | None) -> tuple:
-    distances, R, sx, sy = ctx.saved_tensors
     if grad is None:
-        return None, None, None, None, None, None
+        return (None,) * 6
+    distances, R, sx, sy = ctx.saved_tensors
     grad_distances = torch.ops.torchdtw.soft_dtw_backward.default(grad, distances, R, sx, sy, ctx.gamma)
-    return grad_distances, None, None, None, None, None
+    return grad_distances, *(None,) * 5
 
 
 torch.library.register_autograd("torchdtw::soft_dtw", _backward, setup_context=_setup_context)

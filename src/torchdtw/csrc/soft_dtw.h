@@ -7,14 +7,10 @@
 #include <optional>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/Dispatch_v2.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/util/Exception.h>
-
-#if defined(__CUDACC__) || defined(__HIPCC__)
-#define TORCHDTW_HOST_DEVICE __host__ __device__
-#else
-#define TORCHDTW_HOST_DEVICE
-#endif
+#include <tuple>
 
 // Soft-DTW (Cuturi & Blondel, 2017) cell math and input handling, shared by csrc/soft_dtw.cpp and
 // csrc/cuda/soft_dtw.cu so that both backends run the same recurrence.
@@ -81,23 +77,6 @@ template <typename T> TORCHDTW_HOST_DEVICE inline T backward_term(T log_e_s, T r
   if (r_s == infinity<T>())
     return -infinity<T>();
   return log_e_s + (r_s - d_s - r) * inv_gamma;
-}
-
-// Sequence lengths, read from a 1D tensor, or all equal to `fallback` (the padded size) when it is absent.
-template <typename sx_t> struct Lengths {
-  const sx_t* data;
-  int64_t stride;
-  int64_t fallback;
-
-  TORCHDTW_HOST_DEVICE int64_t operator[](int64_t i) const {
-    return data == nullptr ? fallback : static_cast<int64_t>(data[i * stride]);
-  }
-};
-
-template <typename sx_t> inline Lengths<sx_t> make_lengths(const std::optional<Tensor>& t, int64_t fallback) {
-  if (!t.has_value())
-    return {nullptr, 0, fallback};
-  return {reinterpret_cast<const sx_t*>(t->data_ptr()), t->strides()[0], fallback};
 }
 
 // The soft_dtw ops take distances of shape (B, N, M), for B independent pairs, or (n1, n2, s1, s2), for all pairs
@@ -168,6 +147,68 @@ inline void check_soft_dtw_backward_inputs(const Tensor& grad, const Tensor& dis
   for (int64_t d = 0; d < grad.dim(); d++)
     STD_TORCH_CHECK(grad.size(d) == distances.size(d), "grad must have the shape of the soft_dtw output");
   STD_TORCH_CHECK(grad.scalar_type() == distances.scalar_type(), "grad must have the dtype of distances");
+}
+
+// Calls f.template operator()<distances_t, sx_t>() for the dtypes of the distances and of the lengths.
+template <typename F>
+void dispatch_soft_dtw(
+    torch::headeronly::ScalarType distances_dtype, torch::headeronly::ScalarType lengths_dtype, const F& f) {
+  THO_DISPATCH_V2(
+      distances_dtype,
+      "soft_dtw",
+      AT_WRAP([&] {
+        using distances_t = scalar_t;
+        THO_DISPATCH_V2(
+            lengths_dtype,
+            "soft_dtw_lengths",
+            AT_WRAP([&] {
+              // Parenthesized, or the outer dispatch macro splits the template arguments on their comma.
+              (f.template operator()<distances_t, scalar_t>());
+            }),
+            AT_INTEGRAL_TYPES_V2);
+      }),
+      AT_FLOATING_TYPES,
+      torch::headeronly::ScalarType::Half,
+      torch::headeronly::ScalarType::BFloat16);
+}
+
+// The soft_dtw op, shared by the backends: run.template operator()<distances_t, sx_t>(out, R, pairs, paired) fills
+// the (n1, n2) costs `out`, and the R matrix when keep_R, from the distances viewed as all pairs.
+template <typename Run>
+std::tuple<Tensor, Tensor> soft_dtw_op(
+    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, double gamma,
+    bool keep_R, const Run& run) {
+  const torch::headeronly::ScalarType lengths_dtype = check_soft_dtw_inputs(distances, sx, sy, gamma);
+  const bool paired = distances.dim() == 3;
+  const Tensor pairs = as_all_pairs(distances);
+  Tensor out = torch::stable::new_empty(distances, {pairs.size(0), pairs.size(1)});
+  const auto acc_dtype = acc_scalar_type(distances.scalar_type());
+  Tensor R = keep_R ? torch::stable::new_empty(distances, distances.sizes(), acc_dtype)
+                    : torch::stable::new_empty(distances, {0}, acc_dtype);
+  dispatch_soft_dtw(distances.scalar_type(), lengths_dtype, [&]<typename distances_t, typename sx_t>() {
+    run.template operator()<distances_t, sx_t>(out, R, pairs, paired);
+  });
+  if (paired)
+    out = torch::stable::view(out, {pairs.size(0)});
+  return {out, R};
+}
+
+// The soft_dtw_backward op, shared by the backends: run.template operator()<distances_t, sx_t>(grad_distances,
+// grad_pairs, pairs, paired) fills `grad_distances`, with the gradient of the costs viewed as (n1, n2).
+template <typename Run>
+Tensor soft_dtw_backward_op(
+    const Tensor& grad, const Tensor& distances, const Tensor& R, const std::optional<Tensor>& sx,
+    const std::optional<Tensor>& sy, double gamma, const Run& run) {
+  const torch::headeronly::ScalarType lengths_dtype = check_soft_dtw_inputs(distances, sx, sy, gamma);
+  check_soft_dtw_backward_inputs(grad, distances, R);
+  const bool paired = distances.dim() == 3;
+  const Tensor pairs = as_all_pairs(distances);
+  const Tensor grad_pairs = paired ? torch::stable::view(grad, {pairs.size(0), 1}) : grad;
+  Tensor grad_distances = torch::stable::new_empty(distances, distances.sizes());
+  dispatch_soft_dtw(distances.scalar_type(), lengths_dtype, [&]<typename distances_t, typename sx_t>() {
+    run.template operator()<distances_t, sx_t>(grad_distances, grad_pairs, pairs, paired);
+  });
+  return grad_distances;
 }
 
 } // namespace torchdtw

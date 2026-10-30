@@ -27,13 +27,18 @@ using PackedTensorAccessor =
     torch::headeronly::HeaderOnlyGenericPackedTensorAccessor<T, N, torch::headeronly::RestrictPtrTraits, index_t>;
 template <typename T, size_t N> using PackedTensorAccessor32 = PackedTensorAccessor<T, N, int32_t>;
 template <typename T, size_t N> using PackedTensorAccessor64 = PackedTensorAccessor<T, N, int64_t>;
+template <typename T, size_t N, typename index_t>
+inline PackedTensorAccessor<T, N, index_t> packed_accessor(torch::stable::Tensor t) {
+  return PackedTensorAccessor<T, N, index_t>(
+      static_cast<typename PackedTensorAccessor<T, N, index_t>::PtrType>(t.data_ptr()),
+      t.sizes().data(),
+      t.strides().data());
+}
 template <typename T, size_t N> inline PackedTensorAccessor32<T, N> packed_accessor32(torch::stable::Tensor t) {
-  return PackedTensorAccessor32<T, N>(
-      static_cast<typename PackedTensorAccessor32<T, N>::PtrType>(t.data_ptr()), t.sizes().data(), t.strides().data());
+  return packed_accessor<T, N, int32_t>(t);
 }
 template <typename T, size_t N> inline PackedTensorAccessor64<T, N> packed_accessor64(torch::stable::Tensor t) {
-  return PackedTensorAccessor64<T, N>(
-      static_cast<typename PackedTensorAccessor64<T, N>::PtrType>(t.data_ptr()), t.sizes().data(), t.strides().data());
+  return packed_accessor<T, N, int64_t>(t);
 }
 
 // The current PyTorch stream on the current device, so that kernels are ordered with PyTorch's own work.
@@ -64,6 +69,23 @@ inline int wavefront_threads(int64_t max_x, int64_t max_y, unsigned int num_bloc
       " threads");
 #endif
   return num_threads;
+}
+
+// Grid of a kernel with one block per pair (x, y) of an (n1, n2) batch.
+inline dim3 pair_grid(int64_t n1, int64_t n2) {
+  constexpr int64_t max_grid_x = 2147483647; // 2^31 - 1
+  constexpr int64_t max_grid_y = 65535;
+  STD_TORCH_CHECK(n1 <= max_grid_x, "distances.size(0) exceeds the CUDA grid limit of 2^31-1");
+  STD_TORCH_CHECK(n2 <= max_grid_y, "distances.size(1) exceeds the CUDA grid limit of 65535");
+  return dim3(static_cast<unsigned int>(n1), static_cast<unsigned int>(n2));
+}
+
+// Calls f.template operator()<index_t>() with the index type of the distances: int64_t if needs_64bit, else int32_t.
+template <typename F> void dispatch_index(bool needs_64bit, const F& f) {
+  if (needs_64bit)
+    f.template operator()<int64_t>();
+  else
+    f.template operator()<int32_t>();
 }
 
 inline void check_cuda(cudaError_t err, const char* what) {
