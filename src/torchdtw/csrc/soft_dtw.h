@@ -108,7 +108,8 @@ inline void check_soft_dtw_inputs(
       "distances must be float16, bfloat16, float32 or float64");
   STD_TORCH_CHECK(gamma > 0, "gamma must be positive");
   const bool paired = distances.dim() == 3;
-  check_lengths_tensors(distances, sx, sy, distances.size(0), paired ? distances.size(0) : distances.size(1));
+  check_lengths_tensors(
+      distances, optional_ptr(sx), optional_ptr(sy), distances.size(0), paired ? distances.size(0) : distances.size(1));
   STD_TORCH_CHECK(
       !symmetric || (!paired && distances.size(0) == distances.size(1)),
       "symmetric soft_dtw requires 4D distances with distances.size(0) == distances.size(1)");

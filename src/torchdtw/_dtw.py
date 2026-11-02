@@ -45,7 +45,7 @@ def dtw_batch(
 
     Only the ``(sx[i], sy[j])`` sub-block of each pair is read, so padding beyond the sequence
     lengths is ignored. Every ``sx[i]`` must be ``<= s1`` and every ``sy[j] <= s2``: the CPU backend
-    validates this, and the CUDA backend clamps larger lengths to the padded size. Use ``+inf``
+    raises an error, and the CUDA backend a device-side assert, if violated. Use ``+inf``
     to mask forbidden alignments. NaN distances are unsupported: the result is unspecified and may
     differ between the CPU and CUDA backends. Integer ``distances`` accumulate the cost in their own
     dtype and may overflow on long sequences; use a wide enough integer dtype or a floating dtype.
@@ -61,7 +61,10 @@ def dtw_batch(
     :returns: A 2D tensor of shape (n1, n2) with the costs.
     """
     check_no_cuda_on_windows(distances)
-    return torch.ops.torchdtw.dtw_batch.default(distances, sx, sy, symmetric)
+    if sx is not None and sy is not None:
+        return torch.ops.torchdtw.dtw_batch.default(distances, sx, sy, symmetric)
+    # A separate overload: the optional lengths of its schema cost ~0.15 µs more per call.
+    return torch.ops.torchdtw.dtw_batch.optional_lengths(distances, sx, sy, symmetric)
 
 
 @torch.library.register_fake("torchdtw::dtw")
@@ -72,6 +75,7 @@ def _(distances: torch.Tensor) -> torch.Tensor:
 
 
 @torch.library.register_fake("torchdtw::dtw_batch")
+@torch.library.register_fake("torchdtw::dtw_batch.optional_lengths")
 def _(
     distances: torch.Tensor,
     sx: torch.Tensor | None,

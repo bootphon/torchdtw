@@ -51,7 +51,7 @@ Compute the batched DTW cost on the ``distances`` 4D tensor.
 
 Only the ``(sx[i], sy[j])`` sub-block of each pair is read, so padding beyond the sequence
 lengths is ignored. Every ``sx[i]`` must be ``<= s1`` and every ``sy[j] <= s2``: the CPU backend
-validates this, and the CUDA backend clamps larger lengths to the padded size. Use ``+inf``
+raises an error, and the CUDA backend a device-side assert, if violated. Use ``+inf``
 to mask forbidden alignments. NaN distances are unsupported: the result is unspecified and may
 differ between the CPU and CUDA backends. Integer ``distances`` accumulate the cost in their own
 dtype and may overflow on long sequences; use a wide enough integer dtype or a floating dtype.
@@ -103,7 +103,7 @@ Soft-DTW replaces the minimum over alignments of DTW by the soft minimum
 ``-gamma * log(sum(exp(-cost / gamma)))``, so it is differentiable with respect to ``distances``. Unlike
 ``dtw``, the cost is not normalized by the path length. Only the ``(sx[b], sy[b])`` sub-block of each pair is
 read, and the padding beyond it gets no gradient. Every ``sx[b]`` must be ``<= N`` and every ``sy[b] <= M``:
-the CPU backend validates this, and the CUDA backend clamps larger lengths to the padded size.
+the CPU backend raises an error, and the CUDA backend a device-side assert, if violated.
 
 **Parameters:**
 
@@ -131,7 +131,8 @@ Compute the soft-DTW cost between all pairs of sequences of two batches, on the 
 
 Same as ``soft_dtw``, for every pair ``(i, j)`` instead of B independent pairs. Only the ``(sx[i], sy[j])``
 sub-block of each pair is read, and the padding beyond it gets no gradient. Every ``sx[i]`` must be ``<= s1``
-and every ``sy[j] <= s2``: the CPU backend validates this, and the CUDA backend clamps larger lengths.
+and every ``sy[j] <= s2``: the CPU backend raises an error, and the CUDA backend a device-side assert, if
+violated.
 
 **Parameters:**
 

@@ -46,7 +46,7 @@ def soft_dtw(
     ``-gamma * log(sum(exp(-cost / gamma)))``, so it is differentiable with respect to ``distances``. Unlike
     ``dtw``, the cost is not normalized by the path length. Only the ``(sx[b], sy[b])`` sub-block of each pair is
     read, and the padding beyond it gets no gradient. Every ``sx[b]`` must be ``<= N`` and every ``sy[b] <= M``:
-    the CPU backend validates this, and the CUDA backend clamps larger lengths to the padded size.
+    the CPU backend raises an error, and the CUDA backend a device-side assert, if violated.
 
     :param distances: A 3D tensor of shape (B, N, M) with the pairwise distances between the frames of B pairs of
         sequences, e.g. ``torch.cdist(x, y) ** 2`` for sequences x of shape (B, N, D) and y of shape (B, M, D).
@@ -75,7 +75,8 @@ def soft_dtw_batch(
 
     Same as ``soft_dtw``, for every pair ``(i, j)`` instead of B independent pairs. Only the ``(sx[i], sy[j])``
     sub-block of each pair is read, and the padding beyond it gets no gradient. Every ``sx[i]`` must be ``<= s1``
-    and every ``sy[j] <= s2``: the CPU backend validates this, and the CUDA backend clamps larger lengths.
+    and every ``sy[j] <= s2``: the CPU backend raises an error, and the CUDA backend a device-side assert, if
+    violated.
 
     :param distances: A 4D tensor of shape (n1, n2, s1, s2) with the pairwise distances between the frames of two
         batches of sequences. Must have a floating dtype.

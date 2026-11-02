@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/ops.h>
+#include <torch/headeronly/macros/Macros.h>
 #include <torch/headeronly/util/Exception.h>
 #include <type_traits>
 
@@ -80,33 +81,77 @@ inline dim3 pair_grid(int64_t n1, int64_t n2) {
   return dim3(static_cast<unsigned int>(n1), static_cast<unsigned int>(n2));
 }
 
-// The lengths sx[x] and sy[y] of the pair of a block, clamped to [0, padded size]: negative lengths are empty, and
-// lengths beyond the padded size, which the CPU backend rejects, cannot make the kernels read out of bounds.
-// Both are loaded, in their own type, under a single switch on their dtype (sx and sy have the same dtype when both
-// are present), before any conversion: otherwise the conversion of the first waits for its load before the second is
-// issued, measured ~1% slower on small batches. The clamp is in int32, as the DP loops: clamped in int64, the
-// compiler lost that N, M >= 0 there, ~3% slower.
-struct PairLengths {
+// The lengths sx[x] and sy[y] of the pair of a block. Negative lengths are empty. Lengths beyond the padded size,
+// which the CPU backend rejects, trigger a device-side assert, as out-of-range indices do in PyTorch's own CUDA
+// kernels: checking them on the host would need a synchronization, and clamping them silently would hide the error.
+//
+// The kernels never read out of bounds: with `clamp`, N and M are clamped to the padded sizes, otherwise such pairs
+// are skipped as empty ones, see empty(). Both run as fast as no check at all, but not in the same kernels, through
+// the DP loops that depend on N and M: skipping made the soft-DTW forward ~3% slower, clamping made hard DTW ~1%
+// slower on small batches. The assert runs when the kernel exits, in the destructor: asserting where the lengths are
+// read made the compiler reserve the registers of the assert's function call over the whole DP loop, +8 registers and
+// ~3% slower.
+// Both lengths are loaded, in their own type, under a single switch on their dtype (sx and sy have the same dtype when
+// both are present), before any conversion: otherwise the conversion of the first waits for its load before the
+// second is issued, measured ~1% slower on small batches.
+// `length_t` is the element type of both sx and sy, when the kernel is specialized for it and both are present: they
+// are then loaded directly. It is void for the generic path, which switches on their dtype at run time.
+template <bool clamp, typename length_t = void> struct PairLengths {
   int32_t N;
   int32_t M;
+  bool in_range;
 
   __device__ __forceinline__ PairLengths(const Lengths& sx, int64_t x, const Lengths& sy, int64_t y) {
-    int64_t m = 0;
-    const int64_t n = visit_lengths_dtype(sx.data != nullptr ? sx.dtype : sy.dtype, [&](auto t) {
-      using T = decltype(t);
-      const T* const px = static_cast<const T*>(sx.data);
-      const T* const py = static_cast<const T*>(sy.data);
-      const T a = px != nullptr ? px[x * sx.stride] : T();
-      const T b = py != nullptr ? py[y * sy.stride] : T();
-      m = py != nullptr ? static_cast<int64_t>(b) : sy.fallback;
-      return px != nullptr ? static_cast<int64_t>(a) : sx.fallback;
-    });
-    N = clamp(n, sx.fallback);
-    M = clamp(m, sy.fallback);
+    if constexpr (std::is_void_v<length_t>) {
+      int64_t m;
+      const int64_t n = visit_lengths_dtype(sx.data != nullptr ? sx.dtype : sy.dtype, [&](auto t) {
+        using T = decltype(t);
+        const T* const px = static_cast<const T*>(sx.data);
+        const T* const py = static_cast<const T*>(sy.data);
+        const T a = px != nullptr ? px[x * sx.stride] : T();
+        const T b = py != nullptr ? py[y * sy.stride] : T();
+        m = py != nullptr ? static_cast<int64_t>(b) : sy.fallback;
+        return px != nullptr ? static_cast<int64_t>(a) : sx.fallback;
+      });
+      in_range = n <= sx.fallback && m <= sy.fallback;
+      if constexpr (clamp) {
+        N = clamp_length(n, sx.fallback);
+        M = clamp_length(m, sy.fallback);
+      } else {
+        N = static_cast<int32_t>(n);
+        M = static_cast<int32_t>(m);
+      }
+    } else {
+      static_assert(!clamp, "the kernels specialized for a lengths dtype skip out-of-range pairs");
+      const length_t n = static_cast<const length_t*>(sx.data)[x * sx.stride];
+      const length_t m = static_cast<const length_t*>(sy.data)[y * sy.stride];
+      // These kernels index the distances in int32, so their padded sizes fit in length_t: compared in it, the
+      // lengths need no widening, which made int32 lengths ~1% slower on small batches.
+      in_range = n <= static_cast<length_t>(sx.fallback) && m <= static_cast<length_t>(sy.fallback);
+      N = static_cast<int32_t>(n);
+      M = static_cast<int32_t>(m);
+    }
   }
 
+  // Whether the pair has no cell to compute: a length is not positive, or, unless clamped, out of range.
+  __device__ __forceinline__ bool empty() const {
+    if constexpr (clamp)
+      return N == 0 || M == 0;
+    else
+      return N <= 0 || M <= 0 || !in_range;
+  }
+
+  __device__ __forceinline__ ~PairLengths() {
+    if (threadIdx.x == 0)
+      CUDA_KERNEL_ASSERT_MSG(in_range, "sx and sy values must not exceed distances.size(-2) and distances.size(-1)");
+  }
+
+  PairLengths(const PairLengths&) = delete;
+  PairLengths& operator=(const PairLengths&) = delete;
+
 private:
-  __device__ __forceinline__ static int32_t clamp(int64_t length, int64_t padded) {
+  // In int32, as the DP loops: clamped in int64, the compiler lost that N, M >= 0 there, ~3% slower.
+  __device__ __forceinline__ static int32_t clamp_length(int64_t length, int64_t padded) {
     const int32_t n = static_cast<int32_t>(length < padded ? length : padded);
     return n < 0 ? 0 : n;
   }

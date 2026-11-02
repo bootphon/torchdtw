@@ -79,23 +79,29 @@ TORCHDTW_HOST_DEVICE inline int64_t visit_lengths_dtype(torch::headeronly::Scala
 }
 
 // Checks of the optional lengths sx and sy of the ops, for batch dimensions of sizes nx and ny.
-inline void check_lengths_tensors(
-    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, int64_t nx, int64_t ny) {
+// The optional lengths are passed by pointer, nullptr when absent: converting the Tensor arguments of dtw_batch's
+// default overload to std::optional copies them, which costs reference counting on every call.
+inline const Tensor* optional_ptr(const std::optional<Tensor>& t) { return t.has_value() ? &t.value() : nullptr; }
+
+inline void check_lengths_tensors(const Tensor& distances, const Tensor* sx, const Tensor* sy, int64_t nx, int64_t ny) {
+  // Each query of a tensor is a call through the stable ABI, measured on the small-batch overhead: query each once.
+  // The device index alone tells CPU (-1) from CUDA devices apart.
+  const int32_t device = distances.get_device();
   const int64_t sizes[2] = {nx, ny};
-  const std::optional<Tensor>* lengths[2] = {&sx, &sy};
+  const Tensor* lengths[2] = {sx, sy};
+  torch::headeronly::ScalarType dtypes[2];
   for (int k = 0; k < 2; k++) {
-    if (!lengths[k]->has_value())
+    if (lengths[k] == nullptr)
       continue;
-    const Tensor& t = lengths[k]->value();
+    const Tensor& t = *lengths[k];
     STD_TORCH_CHECK(t.dim() == 1, "sx and sy must be 1D tensors");
     STD_TORCH_CHECK(t.size(0) == sizes[k], "sx and sy sizes must match the batch dimensions of distances");
-    STD_TORCH_CHECK(is_lengths_dtype(t.scalar_type()), "sx and sy must have an integer dtype");
-    STD_TORCH_CHECK(
-        t.is_cuda() == distances.is_cuda() && t.get_device() == distances.get_device(),
-        "sx and sy must be on the same device as distances");
+    dtypes[k] = t.scalar_type();
+    STD_TORCH_CHECK(is_lengths_dtype(dtypes[k]), "sx and sy must have an integer dtype");
+    STD_TORCH_CHECK(t.get_device() == device, "sx and sy must be on the same device as distances");
   }
-  if (sx.has_value() && sy.has_value())
-    STD_TORCH_CHECK(sx->scalar_type() == sy->scalar_type(), "sx and sy dtypes do not match");
+  if (sx != nullptr && sy != nullptr)
+    STD_TORCH_CHECK(dtypes[0] == dtypes[1], "sx and sy dtypes do not match");
 }
 
 // Sequence lengths, read from a 1D integer tensor, or all equal to `fallback` (the padded size) when it is absent.
@@ -115,10 +121,14 @@ struct Lengths {
   }
 };
 
-inline Lengths make_lengths(const std::optional<Tensor>& t, int64_t fallback) {
-  if (!t.has_value())
+inline Lengths make_lengths(const Tensor* t, int64_t fallback) {
+  if (t == nullptr)
     return {nullptr, 0, fallback, torch::headeronly::ScalarType::Long};
   return {t->data_ptr(), t->strides()[0], fallback, t->scalar_type()};
+}
+
+inline Lengths make_lengths(const std::optional<Tensor>& t, int64_t fallback) {
+  return make_lengths(optional_ptr(t), fallback);
 }
 
 // Calls f(x, y) on the pairs of flat indices [start, end) of the upper triangle of an n x n grid of pairs, ordered

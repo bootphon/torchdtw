@@ -200,16 +200,16 @@ def test_length_dtypes(dtype: torch.dtype, device: str) -> None:
 
 
 @pytest.mark.requires_gpu
-def test_cuda_clamps_lengths() -> None:
-    """On CUDA, lengths beyond the padded size are clamped to it, and negative lengths to 0, costs and gradients."""
-    d = torch.rand(2, 4, 5, dtype=torch.float64, device="cuda", requires_grad=True)
-    d_ref = d.detach().clone().requires_grad_()
-    cost = soft_dtw(d, torch.tensor([9, -3], device="cuda"), torch.tensor([5, 99], device="cuda"))
-    cost_ref = soft_dtw(d_ref, torch.tensor([4, 0], device="cuda"), torch.tensor([5, 5], device="cuda"))
-    assert_equal(cost, cost_ref)
-    cost.sum().backward()
-    cost_ref.sum().backward()
-    assert_equal(d.grad, d_ref.grad)
+def test_cuda_negative_lengths_are_empty() -> None:
+    """On CUDA, negative lengths are empty, as on CPU: zero costs and no gradient."""
+    d = torch.rand(2, 4, 5, dtype=torch.float64, requires_grad=True)
+    (d_cpu, sx, sy), (d_cuda, sx_cuda, sy_cuda) = cpu_and_cuda(d, torch.tensor([4, -3]), torch.tensor([-1, 5]))
+    cost_cpu, cost_cuda = soft_dtw(d_cpu, sx, sy), soft_dtw(d_cuda, sx_cuda, sy_cuda)
+    assert_equal(cost_cuda.cpu(), cost_cpu)
+    assert (cost_cpu == 0).all()
+    (cost_cpu.sum() + d_cpu.sum()).backward()
+    (cost_cuda.sum() + d_cuda.sum()).backward()
+    assert_equal(d_cuda.grad.cpu(), d_cpu.grad)
 
 
 def test_noncontiguous() -> None:

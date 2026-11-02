@@ -144,7 +144,7 @@ __global__ void soft_dtw_kernel(
   block_pair<symmetric>(x0, x, y);
   // With `symmetric`, the block also owns the mirror pair (y, x).
   const bool mirror = symmetric && x != y;
-  const PairLengths lengths(sx, x, sy, paired ? x : y);
+  const PairLengths<true> lengths(sx, x, sy, paired ? x : y);
   const int32_t N = lengths.N;
   const int32_t M = lengths.M;
   const index_t s1 = distances.size(2);
@@ -156,7 +156,7 @@ __global__ void soft_dtw_kernel(
     if (mirror)
       fill_padding(R + (static_cast<index_t>(y) * distances.size(1) + x) * s1 * ld, s1, ld, 0, 0, infinity<acc_t>());
   }
-  if (N == 0 || M == 0) {
+  if (lengths.empty()) {
     if (threadIdx.x == 0) {
       out[x][y] = static_cast<scalar_t>(0);
       if (mirror)
@@ -199,7 +199,7 @@ __global__ void soft_dtw_backward_kernel(
   int32_t x, y;
   block_pair<symmetric>(x0, x, y);
   const bool mirror = symmetric && x != y;
-  const PairLengths lengths(sx, x, sy, paired ? x : y);
+  const PairLengths<true> lengths(sx, x, sy, paired ? x : y);
   const int32_t N = lengths.N;
   const int32_t M = lengths.M;
   const index_t s1 = distances.size(2);
@@ -213,7 +213,7 @@ __global__ void soft_dtw_backward_kernel(
     scalar_t* const grad_yx = grad_distances + (static_cast<index_t>(y) * distances.size(1) + x) * s1 * ld;
     fill_padding(grad_yx, s1, ld, 0, 0, static_cast<scalar_t>(0));
   }
-  if (N == 0 || M == 0)
+  if (lengths.empty())
     return;
   // With `symmetric`, the costs of both (x, y) and (y, x) are this pair's.
   const acc_t g =
