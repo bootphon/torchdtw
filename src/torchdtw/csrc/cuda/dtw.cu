@@ -89,10 +89,11 @@ template <typename acc_t, typename distances_t> struct HardCell {
 
 template <typename scalar_t, typename index_t, bool global, typename length_t>
 __global__ void dtw_kernel(
-    PackedTensorAccessor32<scalar_t, 2> out, const PackedTensorAccessor<scalar_t, 4, index_t> distances,
-    const Lengths sx, const Lengths sy, bool symmetric, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
+    PackedTensorAccessor<scalar_t, 2, index_t> out, const PackedTensorAccessor<scalar_t, 4, index_t> distances,
+    const Lengths sx, const Lengths sy, bool symmetric, unsigned char* scratch, size_t scratch_stride, int64_t x0,
+    int64_t y0) {
   int32_t x, y;
-  block_pair(symmetric, false, x0, x, y);
+  block_pair(symmetric, false, x0, y0, x, y);
   if (x >= out.size(0) || y >= out.size(1))
     return;
   const PairLengths<length_t> lengths(sx, x, sy, y);
@@ -146,18 +147,19 @@ void dtw_batch_cuda_impl(
       distances,
       storage,
       launch.num_blocks,
-      [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
+      [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0, int64_t y0) {
         constexpr bool kGlobal = decltype(global)::value;
         auto launch_kernel = [&]<typename index_t, typename length_t>() {
           dtw_kernel<distances_t, index_t, kGlobal, length_t><<<grid, launch.num_threads, smem, stream>>>(
-              packed_accessor32<distances_t, 2>(out),
+              packed_accessor<distances_t, 2, index_t>(out),
               packed_accessor<distances_t, 4, index_t>(distances),
               sx,
               sy,
               symmetric,
               scratch,
               storage.scratch_stride,
-              x0);
+              x0,
+              y0);
         };
         if constexpr (!kGlobal) {
           if (int32_lengths)
@@ -188,15 +190,15 @@ static Tensor dtw_batch_cuda(const Tensor& distances, const Tensor* sx, const Te
         const int64_t s1 = sizes[2];
         const int64_t s2 = sizes[3];
         STD_TORCH_CHECK(
-            s1 + s2 - 1 <= std::numeric_limits<uint16_t>::max(),
-            "Sum of sequence lengths exceeds uint16_t path-length capacity");
+            sx_l.data != nullptr || sy_l.data != nullptr || s1 + s2 - 1 <= MAX_PATH_LENGTH,
+            "Sum of sequence lengths exceeds the CUDA path-length capacity: s1 + s2 - 1 must not exceed 65535");
         if (n1 == 0 || n2 == 0 || (symmetric && n1 == 1))
           return;
         using acc_t = torchdtw::acc_t<distances_t>;
         const size_t cost_bytes = (3 * static_cast<size_t>(s2) * sizeof(acc_t) + 1) & ~static_cast<size_t>(1);
         const size_t diagonal_bytes = cost_bytes + 3 * static_cast<size_t>(s2) * sizeof(uint16_t);
         dtw_batch_cuda_impl<distances_t>(
-            out, distances, sx_l, sy_l, symmetric, plan_wavefront(sizes, symmetric, false, diagonal_bytes));
+            out, distances, sx_l, sy_l, symmetric, plan_wavefront(distances, sizes, symmetric, false, diagonal_bytes));
       });
 }
 

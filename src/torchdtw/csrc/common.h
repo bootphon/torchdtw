@@ -19,11 +19,14 @@ template <typename T, size_t N> inline TensorAccessor<T, N> accessor(Tensor t) {
   return TensorAccessor<T, N>(reinterpret_cast<T*>(t.data_ptr()), t.sizes().data(), t.strides().data());
 }
 
-// Accumulation dtype of the DPs, shared by the CPU and GPU backends: float for half/bfloat16, scalar_t otherwise.
+// Accumulation dtype of the DPs, shared by the CPU and GPU backends: float for half/bfloat16, int32 for 8- and 16-bit
+// integers (cannot overflow on CUDA, where paths have at most 65535 cells), int64 for wider integers, scalar_t
+// otherwise.
 template <typename scalar_t>
 using acc_t = std::conditional_t<
     std::is_same_v<scalar_t, torch::headeronly::Half> || std::is_same_v<scalar_t, torch::headeronly::BFloat16>, float,
-    scalar_t>;
+    std::conditional_t<
+        std::is_integral_v<scalar_t>, std::conditional_t<sizeof(scalar_t) <= 2, int32_t, int64_t>, scalar_t>>;
 
 template <typename F> void dispatch_dtw(torch::headeronly::ScalarType distances_dtype, const F& f) {
   THO_DISPATCH_V2(

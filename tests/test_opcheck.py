@@ -3,6 +3,7 @@
 import pytest
 import torch
 from hypothesis import given
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.library import opcheck
 
 import torchdtw  # ruff: ignore[unused-import] # Need to import it to register dtw operation
@@ -77,3 +78,28 @@ def test_opcheck_dtw_batch_without_lengths(
     sy = make_tensor((m,), dtype=torch.long, low=1, high=y, device=device)
     opcheck(torch.ops.torchdtw.dtw_batch.optional_lengths, (sample, None, None), {"symmetric": False})
     opcheck(torch.ops.torchdtw.dtw_batch.optional_lengths, (sample, None, sy), {"symmetric": False})
+
+
+@pytest.mark.parametrize(
+    ("args", "match"),
+    [
+        ((torch.empty(2, 2, 3, 3), torch.empty(3, dtype=torch.long), None, False), "batch dimensions"),
+        ((torch.empty(2, 2, 3, 3), torch.empty(2, 1, dtype=torch.long), None, False), "1D"),
+        ((torch.empty(2, 2, 3, 3), torch.empty(2), None, False), "integer dtype"),
+        ((torch.empty(2, 2, 3, 3), torch.empty(2, dtype=torch.bool), None, False), "integer dtype"),
+        (
+            (torch.empty(2, 2, 3, 3), torch.empty(2, dtype=torch.int32), torch.empty(2, dtype=torch.long), False),
+            "dtypes do not match",
+        ),
+        ((torch.empty(2, 3, 3, 3), None, None, True), "symmetric"),
+        ((torch.empty(2, 2, 3, 3, dtype=torch.bool), None, None, False), "not implemented"),
+        ((torch.empty(2, 2, 3), None, None, False), "4D"),
+    ],
+)
+def test_fake_dtw_batch_rejects_like_cpu(args: tuple, match: str) -> None:
+    """The fake dtw_batch kernel rejects the same invalid inputs as the CPU kernel."""
+    op = torch.ops.torchdtw.dtw_batch.optional_lengths
+    with pytest.raises(RuntimeError, match=match):
+        op(*args)
+    with FakeTensorMode() as mode, pytest.raises(RuntimeError, match=match):
+        op(*(mode.from_tensor(a) if isinstance(a, torch.Tensor) else a for a in args))

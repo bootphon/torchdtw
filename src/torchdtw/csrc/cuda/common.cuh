@@ -13,6 +13,10 @@
 
 // Default shared memory budget of 48KiB per block
 #define MAX_SHARED_BYTES 49152
+// Launches are chunked along grid.y, limited to 65535 blocks.
+#define MAX_GRID_Y 65535
+// Path lengths are stored as uint16_t: a pair's lengths must satisfy N + M - 1 <= 65535.
+#define MAX_PATH_LENGTH 65535
 
 #ifdef USE_ROCM
 #define TORCHDTW_WARP_SIZE 64
@@ -72,9 +76,8 @@ inline int wavefront_threads(int64_t max_x, int64_t max_y, unsigned int num_bloc
 
 inline dim3 pair_grid(int64_t n1, int64_t n2) {
   constexpr int64_t max_grid_x = 2147483647; // 2^31 - 1
-  constexpr int64_t max_grid_y = 65535;
   STD_TORCH_CHECK(n1 <= max_grid_x, "distances.size(0) exceeds the CUDA grid limit of 2^31-1");
-  STD_TORCH_CHECK(n2 <= max_grid_y, "distances.size(1) exceeds the CUDA grid limit of 65535");
+  STD_TORCH_CHECK(n2 <= max_grid_x, "distances.size(1) exceeds the CUDA grid limit of 2^31-1");
   return dim3(static_cast<unsigned int>(n1), static_cast<unsigned int>(n2));
 }
 
@@ -95,13 +98,14 @@ template <typename length_t = void> struct PairLengths {
         m = py != nullptr ? static_cast<int64_t>(b) : sy.fallback;
         return px != nullptr ? static_cast<int64_t>(a) : sx.fallback;
       });
-      in_range = n <= sx.fallback && m <= sy.fallback;
+      in_range = n <= sx.fallback && m <= sy.fallback && n + m - 1 <= MAX_PATH_LENGTH;
       N = static_cast<int32_t>(n);
       M = static_cast<int32_t>(m);
     } else {
       const length_t n = static_cast<const length_t*>(sx.data)[x * sx.stride];
       const length_t m = static_cast<const length_t*>(sy.data)[y * sy.stride];
-      in_range = n <= static_cast<length_t>(sx.fallback) && m <= static_cast<length_t>(sy.fallback);
+      in_range = n <= static_cast<length_t>(sx.fallback) && m <= static_cast<length_t>(sy.fallback) &&
+                 n + m - 1 <= MAX_PATH_LENGTH;
       N = static_cast<int32_t>(n);
       M = static_cast<int32_t>(m);
     }
@@ -111,7 +115,10 @@ template <typename length_t = void> struct PairLengths {
 
   __device__ __forceinline__ ~PairLengths() {
     if (threadIdx.x == 0)
-      CUDA_KERNEL_ASSERT_MSG(in_range, "sx and sy values must not exceed distances.size(-2) and distances.size(-1)");
+      CUDA_KERNEL_ASSERT_MSG(
+          in_range,
+          "sx and sy values must not exceed distances.size(-2) and distances.size(-1), and sx + sy - 1 must not "
+          "exceed 65535");
   }
 
   PairLengths(const PairLengths&) = delete;
@@ -132,7 +139,7 @@ __device__ __forceinline__ void upper_triangle_pair(int32_t b, bool diagonal, in
     y--;
   while (static_cast<int64_t>(y + 1) * y / 2 <= b)
     y++;
-  x = b - y * (y - 1) / 2;
+  x = static_cast<int32_t>(b - static_cast<int64_t>(y) * (y - 1) / 2);
   if (diagonal)
     y--;
 }
@@ -166,18 +173,25 @@ constexpr int64_t kMaxScratchBytes = int64_t{256} << 20;
 template <typename Launch>
 void launch_wavefront(const torch::stable::Tensor& like, const DiagonalStorage& storage, dim3 grid, Launch&& launch) {
   if (storage.scratch_stride == 0) {
-    launch(std::false_type{}, grid, storage.smem_size, nullptr, int64_t{0});
+    for (int64_t y0 = 0; y0 < grid.y; y0 += MAX_GRID_Y) {
+      const dim3 chunk(grid.x, static_cast<unsigned int>(std::min<int64_t>(MAX_GRID_Y, grid.y - y0)));
+      launch(std::false_type{}, chunk, storage.smem_size, nullptr, int64_t{0}, y0);
+    }
     return;
   }
-  const int64_t row_bytes = static_cast<int64_t>(grid.y) * static_cast<int64_t>(storage.scratch_stride);
+  const int64_t row_bytes =
+      static_cast<int64_t>(std::min<int64_t>(grid.y, MAX_GRID_Y)) * static_cast<int64_t>(storage.scratch_stride);
   const int64_t rows = std::min<int64_t>(grid.x, std::max<int64_t>(1, kMaxScratchBytes / row_bytes));
   torch::stable::Tensor scratch =
       torch::stable::new_empty(like, {rows * row_bytes}, torch::headeronly::ScalarType::Byte);
   unsigned char* const scratch_ptr = reinterpret_cast<unsigned char*>(scratch.data_ptr());
-  for (int64_t x0 = 0; x0 < grid.x; x0 += rows) {
-    const dim3 chunk(static_cast<unsigned int>(std::min<int64_t>(rows, grid.x - x0)), grid.y);
-    launch(std::true_type{}, chunk, size_t{0}, scratch_ptr, x0);
-  }
+  for (int64_t y0 = 0; y0 < grid.y; y0 += MAX_GRID_Y)
+    for (int64_t x0 = 0; x0 < grid.x; x0 += rows) {
+      const dim3 chunk(
+          static_cast<unsigned int>(std::min<int64_t>(rows, grid.x - x0)),
+          static_cast<unsigned int>(std::min<int64_t>(MAX_GRID_Y, grid.y - y0)));
+      launch(std::true_type{}, chunk, size_t{0}, scratch_ptr, x0, y0);
+    }
 }
 
 template <bool global>
@@ -190,13 +204,14 @@ __device__ __forceinline__ unsigned char* block_diagonals(unsigned char* scratch
   }
 }
 
-__device__ __forceinline__ void block_pair(bool symmetric, bool diagonal, int64_t x0, int32_t& x, int32_t& y) {
+__device__ __forceinline__ void
+block_pair(bool symmetric, bool diagonal, int64_t x0, int64_t y0, int32_t& x, int32_t& y) {
   const int32_t row = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
   if (symmetric) {
     upper_triangle_pair(row, diagonal, x, y);
   } else {
     x = row;
-    y = blockIdx.y;
+    y = static_cast<int32_t>(y0) + static_cast<int32_t>(blockIdx.y);
   }
 }
 
@@ -207,17 +222,30 @@ struct WavefrontLaunch {
   bool needs_64bit;
 };
 
-inline WavefrontLaunch
-plan_wavefront(torch::headeronly::IntHeaderOnlyArrayRef sizes, bool symmetric, bool diagonal, size_t diagonal_bytes) {
+inline bool needs_64bit_indexing(const torch::stable::Tensor& distances) {
+  const torch::headeronly::IntHeaderOnlyArrayRef sizes = distances.sizes();
+  const torch::headeronly::IntHeaderOnlyArrayRef strides = distances.strides();
+  constexpr int64_t max_index = std::numeric_limits<int32_t>::max();
+  if (sizes[0] * sizes[1] > max_index)
+    return true;
+  int64_t max_offset = 0;
+  for (size_t d = 0; d < sizes.size(); d++) {
+    if (sizes[d] == 0)
+      return false;
+    max_offset += (sizes[d] - 1) * strides[d];
+  }
+  return max_offset > max_index;
+}
+
+inline WavefrontLaunch plan_wavefront(
+    const torch::stable::Tensor& distances, torch::headeronly::IntHeaderOnlyArrayRef sizes, bool symmetric,
+    bool diagonal, size_t diagonal_bytes) {
   const int64_t n1 = sizes[0];
   const int64_t n2 = sizes[1];
   const int64_t s1 = sizes[2];
   const int64_t s2 = sizes[3];
   const dim3 num_blocks = symmetric ? upper_triangle_grid(n1, diagonal) : pair_grid(n1, n2);
-  return {num_blocks,
-          wavefront_threads(s1, s2, num_blocks.x),
-          diagonal_bytes,
-          n1 * n2 * s1 * s2 > std::numeric_limits<int32_t>::max()};
+  return {num_blocks, wavefront_threads(s1, s2, num_blocks.x), diagonal_bytes, needs_64bit_indexing(distances)};
 }
 
 template <typename Cell> __device__ __forceinline__ void wavefront(Cell& cell, int32_t N, int32_t M) {

@@ -51,3 +51,42 @@ def test_dtw_batch_cuda_64bit_indexing() -> None:
     for i, j in [(0, 0), (nx - 1, 0), (0, ny - 1), (nx - 1, ny - 1)]:
         expected = dtw(d[i, j].cpu())
         assert_equal(out[i, j].cpu(), expected)
+
+
+@pytest.mark.requires_gpu
+def test_dtw_batch_cuda_64bit_indexing_strided_view() -> None:
+    """A small view of a large tensor has few elements but offsets past 2^31: it needs int64 indexing."""
+    nx, ny, s = 4, 2, 20000
+    base_elems = nx * ny * s * s
+    free, _ = torch.cuda.mem_get_info()
+    if free < base_elems + (1 << 30):
+        pytest.skip(f"need ~{base_elems / 1e9:.1f} GB free GPU memory, have {free / 1e9:.1f} GB")
+
+    base = torch.empty((nx, ny, s, s), dtype=torch.uint8, device="cuda")
+    g = torch.Generator(device="cuda").manual_seed(0)
+    d = base[:, :, :8, :8]
+    d.copy_(torch.randint(0, 4, d.shape, generator=g, dtype=torch.uint8, device="cuda"))
+    assert d.numel() <= INT32_MAX < d.storage_offset() + (nx - 1) * d.stride(0)
+
+    expected = dtw_batch(d.cpu())
+    assert_equal(dtw_batch(d).cpu(), expected)
+    assert_equal(dtw(d[nx - 1, ny - 1]).cpu(), expected[nx - 1, ny - 1])
+
+
+@pytest.mark.requires_gpu
+def test_dtw_batch_cuda_symmetric_large_pair_index() -> None:
+    """Symmetric pairs with y > 46341, where y * (y - 1) overflows int32, map to the right (x, y)."""
+    n = 50000
+    free, _ = torch.cuda.mem_get_info()
+    if free < n * n + (1 << 30):
+        pytest.skip(f"need ~{n * n / 1e9:.1f} GB free GPU memory, have {free / 1e9:.1f} GB")
+
+    # Expanded 1x1 distances: d[x, y] = v[x], so the cost of pair (x < y) is v[x]. The output has
+    # n * n > 2^31 elements while the distances hold only n.
+    v = torch.randint(1, 255, (n,), dtype=torch.uint8, device="cuda")
+    d = v.view(n, 1, 1, 1).expand(n, n, 1, 1)
+    out = dtw_batch(d, symmetric=True)
+    for y in (46342, 46343, n - 1):
+        assert_equal(out[:y, y], v[:y])
+        assert_equal(out[y, :y], v[:y])
+        assert out[y, y].item() == 0

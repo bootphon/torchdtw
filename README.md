@@ -27,9 +27,7 @@ dtw(distances)
 Compute the DTW cost of the given ``distances`` 2D tensor.
 
 Use ``+inf`` to mask forbidden alignments. NaN distances are unsupported: the result is
-unspecified and may differ between the CPU and CUDA backends. Integer ``distances`` accumulate
-the cost in their own dtype and may overflow on long sequences; use a wide enough integer dtype
-or a floating dtype.
+unspecified and may differ between the CPU and CUDA backends.
 
 **Parameters:**
 
@@ -48,11 +46,9 @@ dtw_batch(distances, sx=None, sy=None, *, symmetric=False)
 Compute the batched DTW cost on the ``distances`` 4D tensor.
 
 Only the ``(sx[i], sy[j])`` sub-block of each pair is read, so padding beyond the sequence
-lengths is ignored. Every ``sx[i]`` must be ``<= s1`` and every ``sy[j] <= s2``: the CPU backend
-raises an error, and the CUDA backend a device-side assert, if violated. Use ``+inf``
+lengths is ignored. Every ``sx[i]`` must be ``<= s1`` and every ``sy[j] <= s2`. Use ``+inf``
 to mask forbidden alignments. NaN distances are unsupported: the result is unspecified and may
-differ between the CPU and CUDA backends. Integer ``distances`` accumulate the cost in their own
-dtype and may overflow on long sequences; use a wide enough integer dtype or a floating dtype.
+differ between the CPU and CUDA backends.
 
 **Parameters:**
 
@@ -77,9 +73,8 @@ dtw_path(distances)
 
 Compute the DTW path of the given ``distances`` 2D tensor.
 
-No CUDA variant or batched implementation are provided for now.
-Use ``+inf`` to mask forbidden alignments. NaN distances are unsupported and give an
-unspecified path.
+No CUDA variant or batched implementation are provided for now. Use ``+inf`` to mask forbidden alignments.
+NaN distances are unsupported and give an unspecified path.
 
 **Parameters:**
 
@@ -102,7 +97,7 @@ On CUDA, each pair is computed by one block, which keeps three anti-diagonals of
 dynamic program in shared memory when they fit: when `distances.size(-1)` is at most 2730
 for `dtw` and `dtw_batch` in float32, float16 and bfloat16 (1638 in float64).
 Beyond, they are kept in global memory, with no limit on the sequence lengths other than
-`s1 + s2 - 1 <= 65535` for `dtw` and `dtw_batch`.
+`sx[i] + sy[j] - 1 <= 65535` for each pair.
 
 ## Benchmark
 

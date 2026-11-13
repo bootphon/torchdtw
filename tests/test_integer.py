@@ -15,7 +15,7 @@ import torch
 from hypothesis import given
 from hypothesis import strategies as st
 
-from torchdtw import dtw
+from torchdtw import dtw, dtw_batch
 
 from .conftest import assert_equal, make_tensor
 from .reference import reference_dtw_int
@@ -66,3 +66,22 @@ def test_dtw_narrow_path_length_div_guard_cuda(dtype: torch.dtype, k: int, value
     d = torch.zeros((256 * k, 1), dtype=dtype, device="cuda")
     d[0, 0] = value
     assert_equal(dtw(d).cpu(), torch.tensor(0, dtype=dtype))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("dtype", INTEGRAL_DTYPES)
+def test_dtw_integer_accumulates_without_overflow(device: str, dtype: torch.dtype) -> None:
+    """The cost accumulates in a wider dtype: a constant max-value matrix has the max value as normalized cost."""
+    value = torch.iinfo(dtype).max if dtype != torch.int64 else 2**40
+    d = torch.full((2, 3, 16, 16), value, dtype=dtype, device=device)
+    assert_equal(dtw(d[0, 0]).cpu(), torch.tensor(value, dtype=dtype))
+    assert_equal(dtw_batch(d).cpu(), torch.full((2, 3), value, dtype=dtype))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int8, torch.int16])
+def test_dtw_narrow_integer_longest_cuda_path(device: str, dtype: torch.dtype) -> None:
+    """8- and 16-bit costs accumulate in int32 without overflow up to the longest CUDA path (65535 cells)."""
+    value = torch.iinfo(dtype).max
+    d = torch.full((1, 65535), value, dtype=dtype, device=device)
+    assert_equal(dtw(d).cpu(), torch.tensor(value, dtype=dtype))

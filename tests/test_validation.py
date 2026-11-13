@@ -13,7 +13,7 @@ import torch
 
 from torchdtw import dtw, dtw_batch, dtw_path
 
-from .conftest import make_tensor
+from .conftest import assert_equal, make_tensor
 
 
 def _batch(n: int = 2, m: int = 2, x: int = 3, y: int = 3) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -142,20 +142,22 @@ def test_dtw_batch_cuda_negative_lengths_are_empty(symmetric: bool, dtype: torch
     torch.testing.assert_close(out.cpu(), expected)
 
 
-# Each case runs a CUDA op whose lengths exceed the padded sizes. The resulting device-side assert leaves the CUDA
+# Each case runs a CUDA op whose lengths exceed the padded sizes, or the path-length capacity. The resulting device-side assert leaves the CUDA
 # context unusable, hence a subprocess per case.
 OUT_OF_RANGE_CASES = {
     "dtw_batch int32": "torchdtw.dtw_batch(d, torch.tensor([5, 1], dtype=torch.int32, device='cuda'), s32)",
     "dtw_batch int64": "torchdtw.dtw_batch(d, s64, torch.tensor([1, 5], device='cuda'), symmetric=True)",
     "dtw_batch int16": "torchdtw.dtw_batch(d, torch.tensor([5, 1], dtype=torch.int16, device='cuda'))",
     "dtw_batch s2 == 0": "torchdtw.dtw_batch(d[..., :0], s32, torch.tensor([1, 0], dtype=torch.int32, device='cuda'))",
+    "dtw_batch path length": "torchdtw.dtw_batch(torch.zeros(1, 1, 1, 70000, device='cuda'), "
+    "torch.tensor([1], device='cuda'), torch.tensor([70000], device='cuda'))",
 }
 
 
 @pytest.mark.requires_gpu
 @pytest.mark.parametrize("call", OUT_OF_RANGE_CASES.values(), ids=OUT_OF_RANGE_CASES.keys())
 def test_cuda_lengths_out_of_range_assert(call: str) -> None:
-    """On CUDA, lengths beyond the padded sizes trigger a device-side assert, where the CPU backend raises."""
+    """On CUDA, out-of-range lengths trigger a device-side assert, where the CPU backend raises or has no limit."""
     script = f"""
 import torch, torchdtw
 d = torch.rand(2, 2, 3, 4, device="cuda")
@@ -181,20 +183,32 @@ def test_dtw_batch_lengths_must_be_cuda() -> None:
 
 
 @pytest.mark.requires_gpu
-def test_dtw_batch_path_length_overflow() -> None:
-    """CUDA dtw_batch rejects sequence-length sums exceeding the uint16 path-length capacity."""
+@pytest.mark.parametrize("op", ["dtw", "dtw_batch"])
+def test_cuda_padded_path_length_overflow_without_lengths(op: str) -> None:
+    """Without lengths, CUDA rejects padded sizes whose path length exceeds the uint16 capacity on the host."""
     d = torch.zeros((1, 1, 1, 70000), dtype=torch.float32, device="cuda")
-    sx = torch.tensor([1], dtype=torch.long, device="cuda")
-    sy = torch.tensor([70000], dtype=torch.long, device="cuda")
     with pytest.raises(RuntimeError, match="path-length capacity"):
-        dtw_batch(d, sx, sy, symmetric=False)
+        dtw(d[0, 0]) if op == "dtw" else dtw_batch(d)
 
 
 @pytest.mark.requires_gpu
-def test_dtw_batch_grid_dimension_too_large() -> None:
-    """CUDA dtw_batch rejects distances.size(1) beyond the CUDA grid.y limit (65535) with a clear message."""
-    d = torch.zeros((1, 70000, 1, 1), dtype=torch.float32, device="cuda")
-    sx = torch.ones(1, dtype=torch.long, device="cuda")
-    sy = torch.ones(70000, dtype=torch.long, device="cuda")
-    with pytest.raises(RuntimeError, match="CUDA grid limit"):
-        dtw_batch(d, sx, sy, symmetric=False)
+def test_dtw_batch_cuda_padding_beyond_path_length_capacity() -> None:
+    """With lengths, only the real lengths are bound by the path-length capacity, not the padded sizes."""
+    g = torch.Generator().manual_seed(0)
+    sx = torch.tensor([8, 5], dtype=torch.int32)
+    sy = torch.tensor([3, 40, 1], dtype=torch.int32)
+    # s1 + s2 - 1 > 65535; the expanded last dimension keeps the tensor small.
+    d = torch.rand((2, 3, 8, 1), generator=g).expand(2, 3, 8, 70000)
+    assert_equal(dtw_batch(d.cuda(), sx.cuda(), sy.cuda()).cpu(), dtw_batch(d, sx, sy))
+
+
+@pytest.mark.requires_gpu
+@pytest.mark.parametrize("s2", [3, 2800])  # 2800 float32 columns use the global-memory diagonals
+def test_dtw_batch_cuda_beyond_grid_y(s2: int) -> None:
+    """CUDA dtw_batch splits distances.size(1) beyond the grid.y limit (65535) over several launches."""
+    g = torch.Generator().manual_seed(0)
+    n2 = 66000
+    d = torch.rand((1, n2, 1, s2), generator=g)
+    sx = torch.ones(1, dtype=torch.int32)
+    sy = torch.randint(1, s2 + 1, (n2,), generator=g, dtype=torch.int32)
+    assert_equal(dtw_batch(d.cuda(), sx.cuda(), sy.cuda()).cpu(), dtw_batch(d, sx, sy))

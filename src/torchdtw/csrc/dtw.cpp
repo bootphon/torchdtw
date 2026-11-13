@@ -86,7 +86,9 @@ Tensor dtw_cpu(const Tensor& distances) {
   STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
   Tensor out = torch::stable::new_empty(distances, torch::headeronly::IntHeaderOnlyArrayRef());
   dispatch_dtw(distances.scalar_type(), [&]<typename scalar_t>() {
-    thread_local std::vector<acc_t<scalar_t>> workspace;
+    thread_local std::vector<acc_t<scalar_t>> cached;
+    std::vector<acc_t<scalar_t>> temporary;
+    auto& workspace = N * M <= (1 << 20) / static_cast<int64_t>(sizeof(acc_t<scalar_t>)) ? cached : temporary;
     const scalar_t result = compute_dtw_value<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, workspace);
     torch::stable::fill_(out, result);
   });
