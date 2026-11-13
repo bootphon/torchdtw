@@ -43,6 +43,34 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[tool.cibuildwheel]
+build = "cp312-*"
+skip = "*-musllinux*"
+archs = ["native"]
+build-frontend = "build[uv]"
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+before-all = [
+  "dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/$(uname -m | sed s/aarch64/sbsa/)/cuda-rhel8.repo",
+  "dnf install -y cuda-nvcc-12-9 cuda-cudart-devel-12-9",
+]
+build-frontend = { name = "build[uv]", args = ["--no-isolation"] }
+before-build = [
+  'uv pip install "torch==2.13.0" --index-url https://download.pytorch.org/whl/cu129',
+  'uv pip install "ninja>=1.11" "numpy>=1.26.4" "setuptools>=83.0.0" "setuptools-scm>=9.2.2"',
+]
+environment = { CUDA_HOME = "/usr/local/cuda-12.9", PATH = "/usr/local/cuda-12.9/bin:$PATH", TORCH_CUDA_ARCH_LIST = "7.0;7.5;8.0;8.6;9.0;10.0;12.0+PTX" }
+repair-wheel-command = "auditwheel repair --plat \"$AUDITWHEEL_PLAT\" --only-plat -w {dest_dir} {wheel} --exclude 'libtorch*' --exclude 'libc10*' --exclude 'libcu*'"
+
+[tool.cibuildwheel.macos]
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
+repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel} --exclude libtorch --exclude libc10 --ignore-missing-dependencies"
+
+[tool.cibuildwheel.windows]
+repair-wheel-command = "delvewheel repair -w {dest_dir} -v {wheel} --exclude \"torch*.dll;c10*.dll\""
+
 [tool.pytest.ini_options]
 filterwarnings = [
   # Raised from torch.compiler.reset()
