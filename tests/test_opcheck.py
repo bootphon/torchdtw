@@ -5,7 +5,7 @@ import torch
 from hypothesis import given
 from torch.library import opcheck
 
-import torchdtw  # noqa: F401 # Need to import it to register dtw operation
+import torchdtw  # ruff: ignore[unused-import] # Need to import it to register dtw operation
 
 from .conftest import BATCH, DIM, HIGH_MINUS_LOW, LOW, make_tensor
 

@@ -81,7 +81,7 @@ def _(distances: torch.Tensor) -> torch.Tensor:
 
 
 @torch.library.register_fake("torchdtw::dtw_batch")
-def _(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, symmetric: bool) -> torch.Tensor:  # noqa: FBT001
+def _(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, symmetric: bool) -> torch.Tensor:
     """Register the FakeTensor kernel for dtw_batch, for compatibility with torch.compile."""
     torch._check(distances.ndim == 4)
     torch._check(sx.ndim == 1)

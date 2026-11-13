@@ -1,4 +1,3 @@
-# ruff: noqa: S603, T201
 """Compare dtw and dtw_batch between the current checkout and the latest released torchdtw.
 
 Driven by the ``compare`` subcommand of ``python -m dtw_benchmark`` (the CLI lives in ``__main__``).
@@ -124,7 +123,7 @@ def measure_all(label: str, *, min_run_time: float, seed: int) -> tuple[dict, li
         thread_counts = sorted({1, torch.get_num_threads()}) if device.type == "cpu" else [1]
         for shape in DTW_SHAPES:
             out, t = measure_dtw(shape, label, device=device, min_run_time=min_run_time, seed=seed)
-            outputs[("dtw", device.type, shape)] = out
+            outputs["dtw", device.type, shape] = out
             timings.append(t)
         for cfg in BATCH_CONFIGS:
             for num_threads in thread_counts:
@@ -136,7 +135,7 @@ def measure_all(label: str, *, min_run_time: float, seed: int) -> tuple[dict, li
                     min_run_time=min_run_time,
                     seed=seed,
                 )
-                outputs[("dtw_batch", device.type, cfg)] = out
+                outputs["dtw_batch", device.type, cfg] = out
                 timings.append(t)
     return outputs, timings
 
@@ -189,13 +188,13 @@ def driver(*, min_run_time: float, seed: int, path_wheel: str | Path | None = No
         )
         print(shlex.join(released_cmd))
         subprocess.run(released_cmd, check=True)
-        released = pickle.loads(released_pkl.read_bytes())  # noqa: S301
+        released = pickle.loads(released_pkl.read_bytes())
 
         local_pkl = Path(tmp) / "local.pkl"
         local_cmd = _measure_command([], output=local_pkl, label="current", min_run_time=min_run_time, seed=seed)
         print(shlex.join(local_cmd))
         subprocess.run(local_cmd, check=True)
-        local = pickle.loads(local_pkl.read_bytes())  # noqa: S301
+        local = pickle.loads(local_pkl.read_bytes())
 
     print(f"Reference torchdtw version: {released['version']}")
     print(f"Current torchdtw version:   {local['version']}")

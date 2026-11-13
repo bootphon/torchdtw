@@ -21,14 +21,14 @@ def _batch(n: int = 2, m: int = 2, x: int = 3, y: int = 3) -> tuple[torch.Tensor
 
 
 @pytest.mark.parametrize("op", [dtw, dtw_path])
-def test_dtw_requires_2d(op) -> None:  # noqa: ANN001
+def test_dtw_requires_2d(op) -> None:
     """Dtw / dtw_path reject non-2D inputs."""
     with pytest.raises(RuntimeError, match="2D tensor"):
         op(make_tensor((2, 3, 4), dtype=torch.float32, low=0.0, high=1.0))
 
 
 @pytest.mark.parametrize("op", [dtw, dtw_path])
-def test_dtw_rejects_empty(op) -> None:  # noqa: ANN001
+def test_dtw_rejects_empty(op) -> None:
     """Dtw / dtw_path reject an empty 2D tensor."""
     with pytest.raises(RuntimeError, match="Empty input tensor"):
         op(torch.empty((0, 3), dtype=torch.float32))

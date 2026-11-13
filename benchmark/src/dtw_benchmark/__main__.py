@@ -86,11 +86,11 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.command == "run":
-        from .run_benchmark import benchmark  # noqa: PLC0415
+        from .run_benchmark import benchmark
 
         benchmark(args.min_run_time, args.output)
     else:
-        from .compare_release import driver  # noqa: PLC0415
+        from .compare_release import driver
 
         driver(min_run_time=args.min_run_time, seed=args.seed, path_wheel=args.wheel)
 

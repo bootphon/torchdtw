@@ -52,7 +52,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "requires_multi_gpu: skip test if fewer than 2 GPUs are available")
 
 
-def pytest_collection_modifyitems(session: pytest.Session, config: pytest.Config, items: list[pytest.Item]) -> None:  # noqa: ARG001
+def pytest_collection_modifyitems(session: pytest.Session, config: pytest.Config, items: list[pytest.Item]) -> None:
     """Skip tests requiring (multiple) GPUs when the hardware is not available."""
     cuda_available = torch.cuda.is_available()
     multi_gpu = cuda_available and torch.cuda.device_count() >= 2

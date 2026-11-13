@@ -53,29 +53,23 @@ filterwarnings = [
 line-length = 119
 
 [tool.ruff.lint]
-select = ["ALL"]
-ignore = [
-  "COM812",  # missing-trailing-comma
-  "D107",  # undocumented-public-init
-  "D203",  # incorrect-blank-line-before-class
-  "D213",  # multi-line-summary-second-line
-  "N803",  # invalid-argument-name
-  "N806",  # non-lowercase-variable-in-function
-  "PLR0913",  # too-many-arguments
+preview = true
+select = [
+  "correctness",
+  "suspicious",
+  "complexity",
+  "performance",
+  "style",
+  "security",
 ]
 
-[tool.ruff.lint.pylint]
-allow-magic-value-types = ["int", "str"]
-
-[tool.ruff.lint.flake8-self]
-ignore-names = ["_check"]
-
-[tool.ruff.lint.pep8-naming]
-ignore-names = ["F"]
-
 [tool.ruff.lint.per-file-ignores]
-"src/torchdtw/_C*.pyi" = ["N999"]
-"tests/*.py" = ["S101"]
+"benchmark/src/dtw_benchmark/compare_release.py" = [
+  "subprocess-without-shell-equals-true",
+  "suspicious-pickle-import",
+  "suspicious-pickle-usage",
+  "suspicious-subprocess-import",
+]
 
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"

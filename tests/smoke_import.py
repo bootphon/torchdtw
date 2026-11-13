@@ -1,5 +1,4 @@
 """Import smoke test against the oldest supported PyTorch."""
-# ruff: noqa: T201
 
 import sys
 from importlib.metadata import version

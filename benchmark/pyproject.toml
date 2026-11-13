@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 authors = [
   { name = "Maxime Poli" },
-  { name = "CoML", email = "dev@cognitive-ml.fr" }
+  { name = "CoML", email = "dev@cognitive-ml.fr" },
 ]
 dependencies = [
   "numba>=0.62.1",

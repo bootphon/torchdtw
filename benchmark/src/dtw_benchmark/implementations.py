@@ -110,7 +110,7 @@ def _dtw_core(x: npt.NDArray[np.float32]) -> float:
                 c, t = c1, 1
             cost[i, j] = x[i - 1, j - 1] + c
             trace[i, j] = t
-    return cost[-1, -1] / _backtrace(trace)
+    return cost[-1, -1] / _backtrace(trace)  # ty: ignore[invalid-argument-type]
 
 
 def dtw_numba(distances: torch.Tensor) -> torch.Tensor:
@@ -123,7 +123,7 @@ def _dtw_numba_batch(
     distances: npt.NDArray[np.float32],
     sx: npt.NDArray[np.int64],
     sy: npt.NDArray[np.int64],
-    symmetric: bool,  # noqa: FBT001
+    symmetric: bool,
 ) -> npt.NDArray[np.float32]:
     nx = distances.shape[0]
     ny = distances.shape[1]
@@ -180,7 +180,7 @@ def _batch_backtrace(
     task_m: npt.NDArray[np.int64],
     n1: int,
     n2: int,
-    symmetric: bool,  # noqa: FBT001
+    symmetric: bool,
 ) -> npt.NDArray[np.float32]:
     """Normalize per-pair corner costs by the backtrace path length, in parallel over pairs.
 
@@ -190,7 +190,7 @@ def _batch_backtrace(
     for p in numba.prange(task_i.shape[0]):
         n = task_n[p]
         m = task_m[p]
-        path_len = _backtrace(np.ascontiguousarray(trace[p, : n + 1, : m + 1]))
+        path_len = _backtrace(np.ascontiguousarray(trace[p, : n + 1, : m + 1]))  # ty: ignore[invalid-argument-type]
         value = corner[p] / path_len
         out[task_i[p], task_j[p]] = value
         if symmetric:
@@ -243,14 +243,14 @@ try:
         """Triton implementation from Whisper: https://github.com/openai/whisper/blob/main/whisper/triton_ops.py."""
         BLOCK_SIZE = 1024
         M, N = x.shape
-        assert M < BLOCK_SIZE, f"M should be smaller than {BLOCK_SIZE=}"  # noqa: S101
+        assert M < BLOCK_SIZE, f"M should be smaller than {BLOCK_SIZE=}"
         x_skew = F.pad(x, (0, M + 1), value=torch.inf).flatten()[: M * (N + M)].reshape(M, N + M)
         x_skew = x_skew.T.contiguous()
         cost = torch.ones(N + M + 2, M + 2) * torch.inf
         cost[0, 0] = 0
         cost = cost.to(x.device)
         trace = torch.zeros_like(cost, dtype=torch.int32)
-        _dtw_triton_kernel[(1,)](
+        _dtw_triton_kernel[1,](
             cost,
             trace,
             x_skew,
@@ -343,7 +343,7 @@ try:
 
         num_pairs = i_idx.numel()
         max_n, max_m = int(task_n.max()), int(task_m.max())
-        block_size = triton.next_power_of_2(max_n)
+        block_size = triton.next_power_of_2(max_n)  # ty: ignore[invalid-argument-type]
         rows, cols = max_n + max_m + 2, max_n + 2
 
         task_off = ((i_idx * n2 + j_idx) * s1 * s2).to(device=device, dtype=torch.int64)
@@ -355,7 +355,7 @@ try:
         trace = torch.zeros((num_pairs, s1 + 1, s2 + 1), device=device, dtype=torch.int32)
         corner = torch.full((num_pairs,), torch.inf, device=device)
 
-        _dtw_triton_batch_kernel[(num_pairs,)](
+        _dtw_triton_batch_kernel[num_pairs,](
             distances.contiguous(),
             cost,
             trace,
@@ -368,7 +368,7 @@ try:
             cost.stride(1),
             trace.stride(0),
             trace.stride(1),
-            BLOCK_SIZE=block_size,  # ty: ignore[invalid-argument-type]
+            BLOCK_SIZE=block_size,
         )
 
         out = _batch_backtrace(
