@@ -30,11 +30,36 @@ def test_dtw_requires_2d(op) -> None:
         op(make_tensor((2, 3, 4), dtype=torch.float32, low=0.0, high=1.0))
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
 @pytest.mark.parametrize("op", [dtw, dtw_path])
-def test_dtw_rejects_empty(op) -> None:
-    """Dtw / dtw_path reject an empty 2D tensor."""
+def test_dtw_rejects_empty(op, device: str) -> None:
+    """Dtw / dtw_path reject an empty 2D tensor: an empty sequence has no alignment path to normalize by."""
     with pytest.raises(RuntimeError, match="Empty input tensor"):
-        op(torch.empty((0, 3), dtype=torch.float32))
+        op(torch.empty((0, 3), dtype=torch.float32, device=device))
+
+
+EMPTY_SHAPES = {"n1 == 0": (0, 0, 3, 4), "s1 == 0": (2, 2, 0, 4), "s2 == 0": (2, 2, 3, 0)}
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("symmetric", [False, True])
+@pytest.mark.parametrize("shape", EMPTY_SHAPES.values(), ids=EMPTY_SHAPES.keys())
+def test_dtw_batch_empty_inputs(shape: tuple[int, int, int, int], device: str, symmetric: bool) -> None:
+    """dtw_batch accepts an empty batch, or empty sequences: every pair is empty, of cost 0."""
+    n1, n2, s1, s2 = shape
+    d = torch.rand(shape, device=device)
+    expected = torch.zeros((n1, n2), device=device)
+    sx = torch.full((n1,), min(s1, 2), dtype=torch.int32, device=device)
+    sy = torch.full((n2,), min(s2, 2), dtype=torch.int32, device=device)
+    for lengths in ((sx, sy), (sx.long(), -sy.long()), (None, None)):
+        torch.testing.assert_close(dtw_batch(d, *lengths, symmetric=symmetric), expected, rtol=0, atol=0)
+
+
+def test_dtw_batch_empty_sequences_length_exceeds_block() -> None:
+    """On CPU, dtw_batch rejects positive lengths of empty sequences, which exceed their padded size of 0."""
+    d = torch.rand(2, 2, 3, 0)
+    with pytest.raises(RuntimeError, match="sy values must not exceed"):
+        dtw_batch(d, sy=torch.tensor([1, 0]))
 
 
 def test_dtw_batch_requires_4d() -> None:
@@ -123,6 +148,7 @@ OUT_OF_RANGE_CASES = {
     "dtw_batch int32": "torchdtw.dtw_batch(d, torch.tensor([5, 1], dtype=torch.int32, device='cuda'), s32)",
     "dtw_batch int64": "torchdtw.dtw_batch(d, s64, torch.tensor([1, 5], device='cuda'), symmetric=True)",
     "dtw_batch int16": "torchdtw.dtw_batch(d, torch.tensor([5, 1], dtype=torch.int16, device='cuda'))",
+    "dtw_batch s2 == 0": "torchdtw.dtw_batch(d[..., :0], s32, torch.tensor([1, 0], dtype=torch.int32, device='cuda'))",
 }
 
 

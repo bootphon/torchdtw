@@ -111,6 +111,7 @@ cache-keys = [
   { file = "setup.py" },
   { file = "src/torchdtw/csrc/common.h" },
   { file = "src/torchdtw/csrc/dtw.cpp" },
+  { file = "src/torchdtw/csrc/dtw.h" },
   { file = "src/torchdtw/csrc/cuda/common.cuh" },
   { file = "src/torchdtw/csrc/cuda/dtw.cu" },
   { file = "benchmark/src/dtw_benchmark/dtw/dtw_cython.pyx" },

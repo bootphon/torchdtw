@@ -74,12 +74,13 @@ def get_extensions() -> list[Extension]:
         "cxx": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-DTORCH_STABLE_ONLY", *compiler_flags],
         "nvcc": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-O3"],
     }
-    gpu_depends = ["src/torchdtw/csrc/common.h", "src/torchdtw/csrc/cuda/common.cuh"]
+    cpu_depends = ["src/torchdtw/csrc/common.h", "src/torchdtw/csrc/dtw.h"]
+    gpu_depends = [*cpu_depends, "src/torchdtw/csrc/cuda/common.cuh"]
     extensions = [
         CppExtension(
             "torchdtw._C",
             ["src/torchdtw/csrc/dtw.cpp"],
-            depends=["src/torchdtw/csrc/common.h"],
+            depends=cpu_depends,
             extra_compile_args=extra_compile_args,
             extra_link_args=linker_flags,
             py_limited_api=True,

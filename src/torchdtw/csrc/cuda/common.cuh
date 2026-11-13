@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <limits>
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/headeronly/macros/Macros.h>
@@ -53,10 +54,11 @@ inline cudaStream_t current_stream() {
 }
 
 // Threads per block for a wavefront over grids of up to max_x x max_y cells: one per cell of the longest
-// anti-diagonal, rounded up to a whole warp and capped at 1024.
+// anti-diagonal, rounded up to a whole warp and capped at 1024. Grids with no cell (max_x or max_y is 0) still get a
+// warp: their kernels write the empty pairs, and check their lengths.
 inline int wavefront_threads(int64_t max_x, int64_t max_y, unsigned int num_blocks) {
   const int64_t max_diag = max_x < max_y ? max_x : max_y;
-  const int capped_diag = max_diag > 1024 ? 1024 : static_cast<int>(max_diag);
+  const int capped_diag = max_diag > 1024 ? 1024 : max_diag < 1 ? 1 : static_cast<int>(max_diag);
   const int rounded_diag = ((capped_diag + TORCHDTW_WARP_SIZE - 1) / TORCHDTW_WARP_SIZE) * TORCHDTW_WARP_SIZE;
   const int num_threads = rounded_diag > 1024 ? 1024 : rounded_diag;
 #ifdef USE_ROCM
@@ -225,6 +227,43 @@ __device__ __forceinline__ unsigned char* block_diagonals(unsigned char* scratch
     extern __shared__ unsigned char smem[];
     return smem;
   }
+}
+
+// The pair (x, y) of a block of a wavefront kernel: one block per pair of a pair_grid, or with `symmetric` per pair of
+// an upper_triangle_grid, the launch covering blocks [x0, x0 + gridDim.x) of the first grid dimension (see
+// launch_wavefront).
+__device__ __forceinline__ void block_pair(bool symmetric, bool diagonal, int64_t x0, int32_t& x, int32_t& y) {
+  const int32_t row = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
+  if (symmetric) {
+    upper_triangle_pair(row, diagonal, x, y);
+  } else {
+    x = row;
+    y = blockIdx.y;
+  }
+}
+
+// Launch configuration of a wavefront kernel with one block per pair, see block_pair, each holding `diagonal_bytes` of
+// diagonals.
+struct WavefrontLaunch {
+  dim3 num_blocks;
+  int num_threads;
+  size_t diagonal_bytes;
+  bool needs_64bit; // Whether indexing the distances needs 64 bits.
+};
+
+// The launch over all the pairs of distances of sizes (n1, n2, s1, s2), or with `symmetric` over the pairs x < y
+// (x <= y with `diagonal`) of its upper triangle.
+inline WavefrontLaunch
+plan_wavefront(torch::headeronly::IntHeaderOnlyArrayRef sizes, bool symmetric, bool diagonal, size_t diagonal_bytes) {
+  const int64_t n1 = sizes[0];
+  const int64_t n2 = sizes[1];
+  const int64_t s1 = sizes[2];
+  const int64_t s2 = sizes[3];
+  const dim3 num_blocks = symmetric ? upper_triangle_grid(n1, diagonal) : pair_grid(n1, n2);
+  return {num_blocks,
+          wavefront_threads(s1, s2, num_blocks.x),
+          diagonal_bytes,
+          n1 * n2 * s1 * s2 > std::numeric_limits<int32_t>::max()};
 }
 
 // Wavefront DP over the anti-diagonals of an N x M grid, run by a whole block. `cell` owns three diagonal

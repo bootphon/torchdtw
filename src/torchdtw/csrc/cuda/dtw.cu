@@ -1,5 +1,6 @@
 #include <Python.h>
 
+#include "../dtw.h"
 #include "common.cuh"
 #include <limits>
 #include <optional>
@@ -93,20 +94,14 @@ template <typename acc_t, typename distances_t> struct HardCell {
   }
 };
 
-// One block per pair, the launch covering rows [x0, x0 + gridDim.x) of the full grid (see launch_wavefront).
-// `length_t` is the element type of sx and sy, or void to read them generically, see PairLengths.
+// One block per pair, see block_pair. `length_t` is the element type of sx and sy, or void to read them generically,
+// see PairLengths. `symmetric` is a run-time flag: one kernel for both modes.
 template <typename scalar_t, typename index_t, bool global, typename length_t>
 __global__ void dtw_kernel(
     PackedTensorAccessor32<scalar_t, 2> out, const PackedTensorAccessor<scalar_t, 4, index_t> distances,
     const Lengths sx, const Lengths sy, bool symmetric, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
-  const int32_t row = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
   int32_t x, y;
-  if (symmetric) {
-    upper_triangle_pair(row, false, x, y);
-  } else {
-    x = row;
-    y = blockIdx.y;
-  }
+  block_pair(symmetric, false, x0, x, y);
   if (x >= out.size(0) || y >= out.size(1))
     return;
   const PairLengths<false, length_t> lengths(sx, x, sy, y);
@@ -140,16 +135,7 @@ __global__ void dtw_kernel(
   wavefront(cell, N, M);
 
   if (threadIdx.x == 0) {
-    const acc_t final_cost = cell.cost_alpha[M - 1];
-    const uint16_t path_len = cell.len_alpha[M - 1];
-    // For integral dtypes divide in int64 (as on CPU): casting the path length to a
-    // narrow dtype can yield 0 (e.g. 256 as int8) and divide by zero.
-    scalar_t result;
-    if constexpr (std::is_integral_v<scalar_t>) {
-      result = static_cast<scalar_t>(static_cast<int64_t>(final_cost) / static_cast<int64_t>(path_len));
-    } else {
-      result = static_cast<scalar_t>(final_cost / static_cast<acc_t>(path_len));
-    }
+    const scalar_t result = normalized_cost<scalar_t>(cell.cost_alpha[M - 1], cell.len_alpha[M - 1]);
     out[x][y] = result;
     if (symmetric)
       out[y][x] = result;
@@ -158,35 +144,27 @@ __global__ void dtw_kernel(
 
 template <typename distances_t>
 void dtw_batch_cuda_impl(
-    Tensor& out, const Tensor& distances, const Lengths sx, const Lengths sy, bool symmetric, dim3 num_blocks) {
+    Tensor& out, const Tensor& distances, const Lengths sx, const Lengths sy, bool symmetric,
+    const WavefrontLaunch& launch) {
   const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
-  const int64_t nx = distances.size(0);
-  const int64_t ny = distances.size(1);
-  const int64_t max_x = distances.size(2);
-  const int64_t max_y = distances.size(3);
-  const int num_threads = wavefront_threads(max_x, max_y, num_blocks.x);
-  const bool needs_64bit = nx * ny * max_x * max_y > std::numeric_limits<int32_t>::max();
-  using acc_t = torchdtw::acc_t<distances_t>;
-  // The diagonals are 3 cost buffers and 3 path-length buffers, each of length distances.size(3). They fit
-  // MAX_SHARED_BYTES up to 49152 / (3 * (sizeof(acc_t) + sizeof(uint16_t))) = 1638 for double, 2730 for
-  // float/half/bfloat16 (whose costs accumulate in float): beyond, see plan_diagonals.
-  const size_t cost_bytes = (3 * static_cast<size_t>(max_y) * sizeof(acc_t) + 1) & ~static_cast<size_t>(1);
-  const size_t diagonal_bytes = cost_bytes + 3 * static_cast<size_t>(max_y) * sizeof(uint16_t);
-  const DiagonalStorage storage = plan_diagonals(diagonal_bytes);
+  const DiagonalStorage storage = plan_diagonals(launch.diagonal_bytes);
   const cudaStream_t stream = current_stream();
   // Lengths given as int32 or int64, the usual dtypes, are loaded directly by a kernel specialized for them: the
   // generic run-time switch on their dtype measured ~2.5% slower on small and medium batches, where the kernel's
   // prologue weighs. Only the shared memory, 32-bit index kernels are specialized: beyond, sequences or batches are
   // large enough for the prologue not to matter.
-  const bool typed = sx.data != nullptr && sy.data != nullptr && !needs_64bit;
+  const bool typed = sx.data != nullptr && sy.data != nullptr && !launch.needs_64bit;
   const bool int32_lengths = typed && sx.dtype == torch::headeronly::ScalarType::Int;
   const bool int64_lengths = typed && sx.dtype == torch::headeronly::ScalarType::Long;
 
   launch_wavefront(
-      distances, storage, num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
+      distances,
+      storage,
+      launch.num_blocks,
+      [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
         constexpr bool kGlobal = decltype(global)::value;
-        auto launch = [&]<typename index_t, typename length_t>() {
-          dtw_kernel<distances_t, index_t, kGlobal, length_t><<<grid, num_threads, smem, stream>>>(
+        auto launch_kernel = [&]<typename index_t, typename length_t>() {
+          dtw_kernel<distances_t, index_t, kGlobal, length_t><<<grid, launch.num_threads, smem, stream>>>(
               packed_accessor32<distances_t, 2>(out),
               packed_accessor<distances_t, 4, index_t>(distances),
               sx,
@@ -198,46 +176,49 @@ void dtw_batch_cuda_impl(
         };
         if constexpr (!kGlobal) {
           if (int32_lengths)
-            launch.template operator()<int32_t, int32_t>();
+            launch_kernel.template operator()<int32_t, int32_t>();
           else if (int64_lengths)
-            launch.template operator()<int32_t, int64_t>();
+            launch_kernel.template operator()<int32_t, int64_t>();
           else
-            dispatch_index(needs_64bit, [&]<typename index_t>() { launch.template operator()<index_t, void>(); });
+            dispatch_index(
+                launch.needs_64bit, [&]<typename index_t>() { launch_kernel.template operator()<index_t, void>(); });
         } else {
-          dispatch_index(needs_64bit, [&]<typename index_t>() { launch.template operator()<index_t, void>(); });
+          dispatch_index(
+              launch.needs_64bit, [&]<typename index_t>() { launch_kernel.template operator()<index_t, void>(); });
         }
         check_launch("dtw_kernel");
       });
 }
 
-// DTW of each pair of the 4D distances, with lengths sx and sy, which default to the padded sizes when nullptr.
-static Tensor dtw_pairs_cuda(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric) {
-  const int64_t nx = distances.size(0);
-  const int64_t ny = distances.size(1);
-  const int64_t max_x = distances.size(2);
-  const int64_t max_y = distances.size(3);
-  STD_TORCH_CHECK(!symmetric || nx == ny, "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
-  STD_TORCH_CHECK(nx > 0 && ny > 0 && max_x > 0 && max_y > 0, "Empty input tensor");
-  STD_TORCH_CHECK(
-      max_x + max_y - 1 <= std::numeric_limits<uint16_t>::max(),
-      "Sum of sequence lengths exceeds uint16_t path-length capacity");
-  const dim3 num_blocks = symmetric ? upper_triangle_grid(nx, false) : pair_grid(nx, ny);
-
-  Tensor out =
-      symmetric ? torch::stable::new_zeros(distances, {nx, ny}) : torch::stable::new_empty(distances, {nx, ny});
-  if (symmetric && nx <= 1)
-    return out;
-  dispatch_dtw(distances.scalar_type(), [&]<typename distances_t>() {
-    dtw_batch_cuda_impl<distances_t>(
-        out, distances, make_lengths(sx, max_x), make_lengths(sy, max_y), symmetric, num_blocks);
-  });
-  return out;
-}
-
+// dtw_batch, with the lengths sx and sy, nullptr when absent.
 static Tensor dtw_batch_cuda(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric) {
-  STD_TORCH_CHECK(distances.dim() == 4, "distances must be a 4D tensor");
-  check_lengths_tensors(distances, sx, sy, distances.size(0), distances.size(1));
-  return dtw_pairs_cuda(distances, sx, sy, symmetric);
+  return dtw_batch_op(
+      distances,
+      sx,
+      sy,
+      symmetric,
+      [&]<typename distances_t>(
+          Tensor& out, torch::headeronly::IntHeaderOnlyArrayRef sizes, const Lengths& sx_l, const Lengths& sy_l) {
+        const int64_t n1 = sizes[0];
+        const int64_t n2 = sizes[1];
+        const int64_t s1 = sizes[2];
+        const int64_t s2 = sizes[3];
+        STD_TORCH_CHECK(
+            s1 + s2 - 1 <= std::numeric_limits<uint16_t>::max(),
+            "Sum of sequence lengths exceeds uint16_t path-length capacity");
+        // No block to launch: a grid of 0 blocks is not a valid launch, and there are no lengths to check. With s1 or
+        // s2 equal to 0, the kernel still runs, to write the empty pairs and check their lengths, as the CPU does.
+        if (n1 == 0 || n2 == 0 || (symmetric && n1 == 1))
+          return;
+        // The diagonals are 3 cost buffers and 3 path-length buffers, each of length s2. They fit MAX_SHARED_BYTES up
+        // to 49152 / (3 * (sizeof(acc_t) + sizeof(uint16_t))) = 1638 for double, 2730 for float/half/bfloat16 (whose
+        // costs accumulate in float): beyond, see plan_diagonals.
+        using acc_t = torchdtw::acc_t<distances_t>;
+        const size_t cost_bytes = (3 * static_cast<size_t>(s2) * sizeof(acc_t) + 1) & ~static_cast<size_t>(1);
+        const size_t diagonal_bytes = cost_bytes + 3 * static_cast<size_t>(s2) * sizeof(uint16_t);
+        dtw_batch_cuda_impl<distances_t>(
+            out, distances, sx_l, sy_l, symmetric, plan_wavefront(sizes, symmetric, false, diagonal_bytes));
+      });
 }
 
 // The default overload of dtw_batch, with both lengths, see dtw_batch_lengths_cpu.
@@ -252,8 +233,10 @@ Tensor dtw_batch_optional_lengths_cuda(
 
 Tensor dtw_cuda(const Tensor& distances) {
   STD_TORCH_CHECK(distances.dim() == 2, "distances must be a 2D tensor");
-  const Tensor pairs = torch::stable::view(distances, {1, 1, distances.size(0), distances.size(1)});
-  const Tensor result = dtw_pairs_cuda(pairs, nullptr, nullptr, false);
+  const int64_t N = distances.size(0);
+  const int64_t M = distances.size(1);
+  STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
+  const Tensor result = dtw_batch_cuda(torch::stable::view(distances, {1, 1, N, M}), nullptr, nullptr, false);
   return torch::stable::view(result, torch::headeronly::IntHeaderOnlyArrayRef());
 }
 

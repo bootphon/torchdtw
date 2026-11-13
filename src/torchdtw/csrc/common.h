@@ -3,11 +3,13 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/Dispatch_v2.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/core/TensorAccessor.h>
 #include <type_traits>
+#include <vector>
 
 namespace torchdtw {
 
@@ -116,6 +118,12 @@ struct Lengths {
   TORCHDTW_HOST_DEVICE int64_t operator[](int64_t i) const {
     if (data == nullptr)
       return fallback;
+    // int32 and int64, the usual dtypes, are tested before the switch: read once per pair, between two DPs, the
+    // indirect jump of its jump table was mispredicted, ~4% slower on CPU batches of 32 x 32 pairs.
+    if (dtype == torch::headeronly::ScalarType::Int)
+      return static_cast<const int32_t*>(data)[i * stride];
+    if (dtype == torch::headeronly::ScalarType::Long)
+      return static_cast<const int64_t*>(data)[i * stride];
     return visit_lengths_dtype(
         dtype, [&](auto t) { return static_cast<int64_t>(static_cast<const decltype(t)*>(data)[i * stride]); });
   }
@@ -153,6 +161,61 @@ template <typename F> inline void for_upper_triangle(int64_t start, int64_t end,
     }
   }
 }
+
+// Checks that the lengths sx and sy of a batch of sizes (n1, n2, s1, s2) do not exceed the padded sizes s1 and s2.
+inline void check_lengths(const Lengths& sx, const Lengths& sy, int64_t n1, int64_t n2, int64_t s1, int64_t s2) {
+  for (int64_t x = 0; x < n1; x++) {
+    STD_TORCH_CHECK(sx[x] <= s1, "sx values must not exceed distances.size(-2)");
+  }
+  for (int64_t y = 0; y < n2; y++) {
+    STD_TORCH_CHECK(sy[y] <= s2, "sy values must not exceed distances.size(-1)");
+  }
+}
+
+// Calls f(x, y, workspace) on the pairs of an n1 x n2 batch in parallel, with a workspace per chunk of pairs: all the
+// pairs, or with `symmetric` the pairs x < y (x <= y with `diagonal`) of the upper triangle, see for_upper_triangle.
+// One pair per grain: the pairs are small, and grouping them measured slower on batches of many small pairs.
+template <typename T, typename F>
+inline void parallel_pairs(int64_t n1, int64_t n2, bool symmetric, bool diagonal, const F& f) {
+  const int64_t num_pairs = !symmetric ? n1 * n2 : diagonal ? n1 * (n1 + 1) / 2 : n1 * (n1 - 1) / 2;
+  torch::stable::parallel_for(0, num_pairs, 1, [&](int64_t start, int64_t end) {
+    std::vector<T> workspace;
+    if (symmetric) {
+      // `diagonal` as a constant in each loop: as a run-time value, it measured ~4% slower on 8 x 8 symmetric batches,
+      // through branch mispredictions.
+      if (diagonal)
+        for_upper_triangle(start, end, true, [&](int64_t x, int64_t y) { f(x, y, workspace); });
+      else
+        for_upper_triangle(start, end, false, [&](int64_t x, int64_t y) { f(x, y, workspace); });
+    } else {
+      // Advance (x, y) incrementally: a division per pair measured ~1% slower on small pairs.
+      int64_t x = start / n2;
+      int64_t y = start % n2;
+      for (int64_t p = start; p < end; p++) {
+        f(x, y, workspace);
+        if (++y == n2) {
+          y = 0;
+          x++;
+        }
+      }
+    }
+  });
+}
+
+// Distances of one pair. The strides are plain values so that fill_grid's inner loop can be specialized for
+// contiguous rows.
+template <typename scalar_t> struct PairDistances {
+  const scalar_t* data;
+  int64_t stride_i;
+  int64_t stride_j;
+
+  explicit PairDistances(const TensorAccessor<const scalar_t, 2>& distances)
+      : data(distances.data()), stride_i(distances.stride(0)), stride_j(distances.stride(1)) {}
+
+  acc_t<scalar_t> operator()(int64_t i, int64_t j) const {
+    return static_cast<acc_t<scalar_t>>(data[i * stride_i + j * stride_j]);
+  }
+};
 
 // Row-major DP over an N x M grid, stored in `out` with row stride `ld`. `cell` computes each cell's value:
 // origin() for (0, 0), edge(i, j, parent) on the first row or column where a cell has a single parent,

@@ -1,12 +1,10 @@
 #include <Python.h>
 
-#include "common.h"
+#include "dtw.h"
 #include <algorithm>
-#include <cmath>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/headeronly/util/Exception.h>
-#include <type_traits>
 #include <vector>
 
 /* Creates a dummy empty _C module that can be imported from Python.
@@ -31,29 +29,22 @@ PyMODINIT_FUNC PyInit__C(void) {
 namespace torchdtw {
 
 // Accumulated DTW cost of each cell: its distance plus the minimum cost among its parents. The inner cell is
-// branchless, and the strides are held as plain values so that the compiler can specialize fill_grid's inner
-// loop for contiguous rows.
+// branchless.
 template <typename scalar_t> struct HardCell {
   using acc = acc_t<scalar_t>;
-  const scalar_t* data;
-  int64_t stride_i;
-  int64_t stride_j;
+  PairDistances<scalar_t> distances;
 
-  explicit HardCell(const TensorAccessor<const scalar_t, 2>& distances)
-      : data(distances.data()), stride_i(distances.stride(0)), stride_j(distances.stride(1)) {}
-
-  acc distance(int64_t i, int64_t j) const { return static_cast<acc>(data[i * stride_i + j * stride_j]); }
-  acc origin() const { return distance(0, 0); }
-  acc edge(int64_t i, int64_t j, acc parent) const { return distance(i, j) + parent; }
+  acc origin() const { return distances(0, 0); }
+  acc edge(int64_t i, int64_t j, acc parent) const { return distances(i, j) + parent; }
   acc inner(int64_t i, int64_t j, acc diag, acc left, acc up) const {
-    return distance(i, j) + std::min({up, diag, left});
+    return distances(i, j) + std::min({up, diag, left});
   }
 };
 
 template <typename scalar_t>
 static void
 compute_dtw_cost(const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M, acc_t<scalar_t>* cost) {
-  fill_grid(HardCell<scalar_t>(distances_a), N, M, cost, M);
+  fill_grid(HardCell<scalar_t>{PairDistances<scalar_t>(distances_a)}, N, M, cost, M);
 }
 
 // Walks the DTW path back from (N - 1, M - 1) to (0, 0) through the accumulated costs, calling visit(i, j) on
@@ -89,20 +80,13 @@ template <typename scalar_t>
 static scalar_t compute_dtw_value(
     const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M,
     std::vector<acc_t<scalar_t>>& workspace) {
-  using acc = acc_t<scalar_t>;
   if (static_cast<int64_t>(workspace.size()) < N * M) {
     workspace.resize(N * M);
   }
   compute_dtw_cost<scalar_t>(distances_a, N, M, workspace.data());
   int64_t path_len = 0;
   trace_dtw_path(workspace.data(), N, M, [&](int64_t, int64_t) { path_len++; });
-  // For integral dtypes divide in int64: casting the path length to a narrow dtype
-  // can yield 0 (e.g. 256 as int8) and trap on integer division by zero.
-  if constexpr (std::is_integral_v<scalar_t>) {
-    return static_cast<scalar_t>(workspace[N * M - 1] / path_len);
-  } else {
-    return static_cast<scalar_t>(workspace[N * M - 1] / static_cast<acc>(path_len));
-  }
+  return normalized_cost<scalar_t>(workspace[N * M - 1], path_len);
 }
 
 Tensor dtw_cpu(const Tensor& distances) {
@@ -142,62 +126,35 @@ Tensor dtw_path_cpu(const Tensor& distances) {
 }
 
 template <typename distances_t>
-void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Lengths sx, const Lengths sy, bool symmetric) {
-  const int64_t nx = distances.size(0);
-  const int64_t ny = distances.size(1);
+void dtw_batch_cpu_impl(
+    Tensor& out, const Tensor& distances, torch::headeronly::IntHeaderOnlyArrayRef sizes, const Lengths sx,
+    const Lengths sy, bool symmetric) {
+  using acc = acc_t<distances_t>;
+  check_lengths(sx, sy, sizes[0], sizes[1], sizes[2], sizes[3]);
   const auto distances_a = accessor<const distances_t, 4>(distances);
   auto out_a = accessor<distances_t, 2>(out);
-
-  for (int64_t i = 0; i < nx; i++) {
-    STD_TORCH_CHECK(sx[i] <= distances.size(2), "sx values must not exceed distances.size(2)");
-  }
-  for (int64_t j = 0; j < ny; j++) {
-    STD_TORCH_CHECK(sy[j] <= distances.size(3), "sy values must not exceed distances.size(3)");
-  }
-
-  if (symmetric) {
-    torch::stable::parallel_for(0, nx * (nx - 1) / 2, 1, [&](int64_t start, int64_t end) {
-      std::vector<acc_t<distances_t>> workspace;
-      for_upper_triangle(start, end, false, [&](int64_t i, int64_t j) {
-        const int64_t N = sx[i];
-        const int64_t M = sy[j];
-        if (N > 0 && M > 0) {
-          const distances_t value = compute_dtw_value<distances_t>(distances_a[i][j], N, M, workspace);
-          out_a[i][j] = value;
-          out_a[j][i] = value;
-        }
-      });
-    });
-  } else {
-    // Each row does exactly ny pairs, so a row-parallel split is already balanced.
-    torch::stable::parallel_for(0, nx, 1, [&](int64_t start, int64_t end) {
-      std::vector<acc_t<distances_t>> workspace;
-      for (int64_t i = start; i < end; i++) {
-        const int64_t N = sx[i];
-        for (int64_t j = 0; j < ny; j++) {
-          const int64_t M = sy[j];
-          if (N <= 0 || M <= 0)
-            continue;
-          out_a[i][j] = compute_dtw_value<distances_t>(distances_a[i][j], N, M, workspace);
-        }
-      }
-    });
-  }
+  parallel_pairs<acc>(sizes[0], sizes[1], symmetric, false, [&](int64_t x, int64_t y, std::vector<acc>& workspace) {
+    const int64_t N = sx[x];
+    const int64_t M = sy[y];
+    const distances_t value =
+        N > 0 && M > 0 ? compute_dtw_value<distances_t>(distances_a[x][y], N, M, workspace) : distances_t(0);
+    out_a[x][y] = value;
+    if (symmetric)
+      out_a[y][x] = value;
+  });
 }
 
 // dtw_batch, with the lengths sx and sy, nullptr when absent.
 static Tensor dtw_batch_cpu(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric) {
-  STD_TORCH_CHECK(distances.dim() == 4, "distances must be a 4D tensor");
-  check_lengths_tensors(distances, sx, sy, distances.size(0), distances.size(1));
-  STD_TORCH_CHECK(
-      !symmetric || distances.size(0) == distances.size(1),
-      "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
-  Tensor out = torch::stable::new_zeros(distances, {distances.size(0), distances.size(1)});
-  dispatch_dtw(distances.scalar_type(), [&]<typename distances_t>() {
-    dtw_batch_cpu_impl<distances_t>(
-        out, distances, make_lengths(sx, distances.size(2)), make_lengths(sy, distances.size(3)), symmetric);
-  });
-  return out;
+  return dtw_batch_op(
+      distances,
+      sx,
+      sy,
+      symmetric,
+      [&]<typename distances_t>(
+          Tensor& out, torch::headeronly::IntHeaderOnlyArrayRef sizes, const Lengths& sx_l, const Lengths& sy_l) {
+        dtw_batch_cpu_impl<distances_t>(out, distances, sizes, sx_l, sy_l, symmetric);
+      });
 }
 
 // The default overload of dtw_batch, with both lengths. Missing lengths go through the optional_lengths overload:
