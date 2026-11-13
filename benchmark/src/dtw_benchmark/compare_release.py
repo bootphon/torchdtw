@@ -1,52 +1,40 @@
-"""Compare dtw and dtw_batch between the current checkout and the latest released torchdtw.
+"""Compare torchdtw's ``dtw`` and ``dtw_batch`` between two builds: correctness, then speed.
 
-Driven by the ``compare`` subcommand of ``python -m dtw_benchmark`` (the CLI lives in ``__main__``).
-``driver`` spawns a child via ``uv run --no-project --with torchdtw==<ver>`` to measure the released
-version with identical inputs, measures the torchdtw installed in the current environment in-process
-(so the project is never rebuilt by ``uv run``), then checks correctness and prints a side-by-side
-timing comparison.
+Driven by the ``compare`` subcommand of ``python -m dtw_benchmark`` (the CLI lives in ``__main__``). Each side, the
+baseline and the candidate, is a wheel path, a version spec (``torchdtw==1.2.3``) or ``installed``, the torchdtw of
+the current environment. ``driver`` installs each side other than ``installed`` into its own temporary directory
+with ``uv pip install --no-deps --target``, then measures both sides the same way, each in a child process: this
+interpreter runs this module as a script, with the side's directory first on ``PYTHONPATH`` so that its torchdtw
+shadows the installed one. Both sides then share the interpreter and torch, and only torchdtw differs.
 
-The child runs this module directly as a script (``uv run ... python compare_release.py ...``) in a
-clean environment that only has ``torch`` and ``torchdtw`` installed. Running it as a script puts its
-own directory on ``sys.path``, so it only depends on ``torch`` and ``torchdtw`` -- not the rest of the
-``dtw_benchmark`` package, which would not be importable there.
+Running this module as a script puts its own directory on ``sys.path``: the child imports ``cases`` and ``timing``
+as sibling modules, which only depend on torch.
 """
 
 import argparse
 import json
+import os
 import pickle
 import shlex
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import torch
-from packaging.utils import parse_wheel_filename
-from torch.utils.benchmark import Compare, Measurement, Timer
+from torch.utils.benchmark import Compare, Measurement
 
-import torchdtw
+if __package__:
+    from . import cases, timing
+else:  # run as a script by ``driver``
+    import cases  # ty: ignore[import-not-found]
+    import timing  # ty: ignore[import-not-found]
 
-DTW_SHAPES = [
-    (8, 8),
-    (16, 16),
-    (32, 32),
-    (64, 64),
-    (128, 128),
-    (256, 256),
-    (512, 512),
-    (1024, 1024),
-]
-BATCH_CONFIGS = [
-    (4, 4, 128, 128, True),
-    (4, 4, 128, 128, False),
-    (8, 8, 256, 256, True),
-    (4, 8, 256, 512, False),
-    (64, 64, 8, 8, True),
-    (32, 32, 16, 16, True),
-    (16, 32, 32, 32, False),
-]
+INSTALLED = "installed"
+# Changes of the median beyond this fraction are listed after the tables.
+THRESHOLD = 0.01
 
 
 def latest_version() -> str:
@@ -56,88 +44,85 @@ def latest_version() -> str:
     return json.loads(process.stdout)["latest"]
 
 
-def measure_dtw(
-    shape: tuple[int, int],
-    label: str,
-    *,
-    device: torch.device,
-    min_run_time: float,
-    seed: int,
-) -> tuple[torch.Tensor, Measurement]:
-    """Measure the 'dtw' function and return the output on a random sample."""
-    g = torch.Generator(device="cpu").manual_seed(seed)
-    x = torch.rand(shape, generator=g, dtype=torch.float32).to(device)
-    out = torchdtw.dtw(x).detach().cpu().clone()
-    sync = "; torch.cuda.synchronize()" if x.is_cuda else ""
-    t = Timer(
-        stmt=f"dtw(x){sync}",
-        setup="from torchdtw import dtw\nimport torch",
-        globals={"x": x},
-        label=f"dtw / {device.type}",
-        sub_label=f"{shape[0]}x{shape[1]}",
-        description=label,
-    ).blocked_autorange(min_run_time=min_run_time)
-    return out, t
+# --- Child: measure the torchdtw it imports ---
 
 
-def measure_batch(
-    cfg: tuple[int, int, int, int, bool],
-    label: str,
-    *,
+def _time(
+    call: Callable[[], object],
     device: torch.device,
+    *,
+    timer: str,
     num_threads: int,
+    label: str,
+    sub_label: str,
+    description: str,
     min_run_time: float,
-    seed: int,
-) -> tuple[torch.Tensor, Measurement]:
-    """Measure the 'dtw_batch' function and return the output on a random sample."""
-    n1, n2, s1, s2, symmetric = cfg
-    g = torch.Generator(device="cpu").manual_seed(seed)
-    d = torch.rand((n1, n2, s1, s2), generator=g, dtype=torch.float32)
-    if symmetric:
-        n = min(n1, n2)
-        i, j = torch.triu_indices(n, n)
-        d[:n, :n][i, j] = d[:n, :n][j, i]
-    sx = torch.randint(1, s1 + 1, (n1,), generator=g, dtype=torch.long)
-    sy = sx.clone() if symmetric and n1 == n2 else torch.randint(1, s2 + 1, (n2,), generator=g, dtype=torch.long)
-    d, sx, sy = d.to(device), sx.to(device), sy.to(device)
-
-    out = torchdtw.dtw_batch(d, sx, sy, symmetric=symmetric).detach().cpu().clone()
-    sync = "; torch.cuda.synchronize()" if d.is_cuda else ""
-    threads_label = f", t={num_threads}" if device.type == "cpu" else ""
-    t = Timer(
-        stmt=f"dtw_batch(d, sx, sy, symmetric=sym){sync}",
-        setup="from torchdtw import dtw_batch\nimport torch",
-        globals={"d": d, "sx": sx, "sy": sy, "sym": symmetric},
+) -> Measurement:
+    """GPU time of a CUDA case with ``--timer gpu``, else wall-clock time, with a CUDA sync after each call."""
+    if timer == "gpu" and device.type == "cuda":
+        return timing.gpu_time(
+            call, label=label, sub_label=sub_label, description=description, min_run_time=min_run_time
+        )
+    return timing.wall_time(
+        call,
+        label=label,
+        sub_label=sub_label,
+        description=description,
+        min_run_time=min_run_time,
         num_threads=num_threads,
-        label=f"dtw_batch / {device.type}",
-        sub_label=f"n={n1}x{n2}, s={s1}x{s2}, {'sym' if symmetric else 'asym'}{threads_label}",
-        description=label,
-    ).blocked_autorange(min_run_time=min_run_time)
-    return out, t
+        sync_each_call=device.type == "cuda",
+    )
 
 
-def measure_all(label: str, *, min_run_time: float, seed: int) -> tuple[dict, list[Measurement]]:
-    """Measure 'dtw' and 'dtw_batch' on all configurations."""
+def measure_all(
+    description: str, *, timer: str, only: str | None, min_run_time: float, seed: int
+) -> tuple[dict, list[Measurement]]:
+    """Measure ``dtw`` and ``dtw_batch`` on every case whose ``"<label> <sub_label>"`` contains ``only``.
+
+    Batch cases run with int32 and int64 lengths, and on the CPU with 1 thread and with all of them.
+    """
+    import torchdtw  # only the child imports torchdtw
+
     outputs, timings = {}, []
-    devices = [torch.device("cpu")] + ([torch.device("cuda")] if torch.cuda.is_available() else [])
-    for device in devices:
+
+    def measure(
+        fn: Callable[[], torch.Tensor], device: torch.device, label: str, sub_label: str, num_threads: int = 1
+    ) -> None:
+        if only is not None and only not in f"{label} {sub_label}":
+            return
+        fn()  # warm-up
+        outputs[label, sub_label] = fn().detach().cpu().clone()
+        timings.append(
+            _time(
+                fn,
+                device,
+                timer=timer,
+                num_threads=num_threads,
+                label=label,
+                sub_label=sub_label,
+                description=description,
+                min_run_time=min_run_time,
+            )
+        )
+
+    for device in cases.devices():
+        for shape in cases.SHAPES:
+            x = cases.single_input(shape, device=device, seed=seed)
+            measure(lambda x=x: torchdtw.dtw(x), device, f"dtw / {device.type}", cases.shape_label(shape))
         thread_counts = sorted({1, torch.get_num_threads()}) if device.type == "cpu" else [1]
-        for shape in DTW_SHAPES:
-            out, t = measure_dtw(shape, label, device=device, min_run_time=min_run_time, seed=seed)
-            outputs["dtw", device.type, shape] = out
-            timings.append(t)
-        for cfg in BATCH_CONFIGS:
-            for num_threads in thread_counts:
-                out, t = measure_batch(
-                    cfg,
-                    label,
-                    device=device,
-                    num_threads=num_threads,
-                    min_run_time=min_run_time,
-                    seed=seed,
-                )
-                outputs["dtw_batch", device.type, cfg] = out
-                timings.append(t)
+        for config in cases.BATCH_CONFIGS:
+            for spread in cases.SPREADS:
+                for dtype in (torch.int32, torch.int64):
+                    d, sx, sy = cases.batch_inputs(config, spread, device=device, seed=seed, lengths_dtype=dtype)
+                    for num_threads in thread_counts:
+                        threads = f" t={num_threads}" if device.type == "cpu" else ""
+                        measure(
+                            lambda d=d, sx=sx, sy=sy, sym=config[-1]: torchdtw.dtw_batch(d, sx, sy, symmetric=sym),
+                            device,
+                            f"dtw_batch / {device.type}",
+                            f"{cases.batch_label(config, spread)} {str(dtype).removeprefix('torch.')}{threads}",
+                            num_threads,
+                        )
     return outputs, timings
 
 
@@ -148,90 +133,148 @@ def _installed_version() -> str:
         return "unknown"
 
 
-def measure_and_dump(label: str, output: str | Path, *, min_run_time: float, seed: int) -> None:
-    """Measure 'dtw' and 'dtw_batch' and dump the output with pickle."""
-    outputs, timings = measure_all(label, min_run_time=min_run_time, seed=seed)
-    dump = pickle.dumps({"label": label, "version": _installed_version(), "outputs": outputs, "timings": timings})
-    Path(output).write_bytes(dump)
+def _child_main() -> None:
+    """Child entry point: measure the torchdtw it imports, and dump the results with pickle."""
+    parser = argparse.ArgumentParser(description="Measure one torchdtw build (internal child of 'compare').")
+    parser.add_argument("--output", type=Path, required=True, help="Path to write the pickled measurements to.")
+    parser.add_argument("--side", required=True, help="Side of the comparison: 'baseline' or 'candidate'.")
+    parser.add_argument("--min-run-time", type=float, required=True, help="Minimum measurement time per case.")
+    parser.add_argument("--seed", type=int, required=True, help="Seed for the random inputs.")
+    parser.add_argument("--timer", choices=["wall", "gpu"], required=True, help="How to time the CUDA cases.")
+    parser.add_argument("--only", help="Only measure the cases whose label contains this substring.")
+    parser.add_argument("--expect-dir", type=Path, help="Directory that the imported torchdtw must come from.")
+    args = parser.parse_args()
+
+    import torchdtw
+
+    location = Path(torchdtw.__file__).resolve().parent
+    if args.expect_dir is not None and not location.is_relative_to(args.expect_dir.resolve()):
+        msg = f"The {args.side} imported torchdtw from {location}, not from {args.expect_dir}"
+        raise SystemExit(msg)
+    pkg_version = _installed_version()
+    print(f"{args.side}: torchdtw {pkg_version} from {location}", flush=True)
+    outputs, timings = measure_all(
+        f"{args.side} {pkg_version}",
+        timer=args.timer,
+        only=args.only,
+        min_run_time=args.min_run_time,
+        seed=args.seed,
+    )
+    dump = {"version": pkg_version, "outputs": outputs, "timings": timings}
+    args.output.write_bytes(pickle.dumps(dump))
 
 
-def _measure_command(uv_args: list[str], *, output: Path, label: str, min_run_time: float, seed: int) -> list[str]:
-    """Build the ``uv run ... python compare_release.py`` command that measures one torchdtw version."""
-    child = [
-        "python",
-        str(Path(__file__)),
-        "--output",
-        str(output),
-        "--label",
-        label,
-        "--min-run-time",
-        str(min_run_time),
-        "--seed",
-        str(seed),
-    ]
-    return ["uv", "run", *uv_args, *child]
+# --- Driver: install both sides, measure each in a child, compare ---
 
 
-def driver(*, min_run_time: float, seed: int, path_wheel: str | Path | None = None) -> None:
-    """Driver for measurements across versions."""
-    if path_wheel is None:
-        reference_version = latest_version()
-        reference = f"torchdtw=={reference_version}"
+def _install(spec: str, target: Path) -> None:
+    """Install the torchdtw of ``spec`` (a wheel path or a version spec), without dependencies, into ``target``."""
+    cmd = ["uv", "pip", "install", "--no-deps", "--target", str(target), "--python", sys.executable, spec]
+    print(shlex.join(cmd), flush=True)
+    subprocess.run(cmd, check=True)
+
+
+def _measure(
+    side: str,
+    target: Path | None,
+    output: Path,
+    *,
+    timer: str,
+    only: str | None,
+    min_run_time: float,
+    seed: int,
+) -> dict:
+    """Measure one side in a child process: this interpreter, with ``target`` first on ``PYTHONPATH``."""
+    cmd = [sys.executable, str(Path(__file__).resolve())]
+    cmd += ["--output", str(output), "--side", side, "--min-run-time", str(min_run_time), "--seed", str(seed)]
+    cmd += ["--timer", timer]
+    if only is not None:
+        cmd += ["--only", only]
+    env = dict(os.environ)
+    if target is not None:
+        cmd += ["--expect-dir", str(target)]
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (str(target), env.get("PYTHONPATH")) if p)
+        print(f"PYTHONPATH={shlex.quote(env['PYTHONPATH'])} {shlex.join(cmd)}", flush=True)
     else:
-        reference_version = str(parse_wheel_filename(Path(path_wheel).name)[1])
-        reference = str(path_wheel)
+        print(shlex.join(cmd), flush=True)
+    subprocess.run(cmd, check=True, env=env)
+    return pickle.loads(output.read_bytes())
 
+
+def _changes(baseline: list[Measurement], candidate: list[Measurement]) -> list[tuple[float, str]]:
+    """Relative change of the median of each case, from the baseline to the candidate."""
+    medians = {(m.task_spec.label, m.task_spec.sub_label): m.median for m in baseline}
+    return [
+        (m.median / medians[key] - 1, f"{key[0]} {key[1]}")
+        for m in candidate
+        if (key := (m.task_spec.label, m.task_spec.sub_label)) in medians
+    ]
+
+
+def driver(
+    baseline: str | None = None,
+    candidate: str = INSTALLED,
+    *,
+    timer: str = "wall",
+    only: str | None = None,
+    min_run_time: float = 1,
+    seed: int = 0,
+) -> None:
+    """Measure the baseline and the candidate on the same cases, check that they agree, and compare their times."""
+    if baseline is None:
+        baseline = f"torchdtw=={latest_version()}"
+    results = {}
     with tempfile.TemporaryDirectory() as tmp:
-        released_pkl = Path(tmp) / "released.pkl"
-        released_cmd = _measure_command(
-            ["--no-project", "--with", reference],
-            output=released_pkl,
-            label=f"reference {reference_version}",
-            min_run_time=min_run_time,
-            seed=seed,
-        )
-        print(shlex.join(released_cmd))
-        subprocess.run(released_cmd, check=True)
-        released = pickle.loads(released_pkl.read_bytes())
+        for side, spec in (("baseline", baseline), ("candidate", candidate)):
+            target = None
+            if spec != INSTALLED:
+                target = Path(tmp) / side
+                _install(spec, target)
+            results[side] = _measure(
+                side,
+                target,
+                Path(tmp) / f"{side}.pkl",
+                timer=timer,
+                only=only,
+                min_run_time=min_run_time,
+                seed=seed,
+            )
+    base, cand = results["baseline"], results["candidate"]
+    if not base["timings"]:
+        msg = f"No case matches --only {only!r}"
+        raise SystemExit(msg)
 
-    # The current version is measured in-process, with whatever torchdtw is installed in this environment:
-    # no 'uv run' sync, so the project is never rebuilt behind the user's back.
-    outputs, timings = measure_all("current", min_run_time=min_run_time, seed=seed)
-    local = {"version": _installed_version(), "outputs": outputs, "timings": timings}
+    print(f"\nBaseline:  torchdtw {base['version']} ({baseline})")
+    print(f"Candidate: torchdtw {cand['version']} ({candidate})")
+    print(f"Timer: {timer}" + (" (CUDA cases only; CPU cases are wall-clock)" if timer == "gpu" else ""))
 
-    print(f"Reference torchdtw version: {released['version']}")
-    print(f"Current torchdtw version:   {local['version']}")
-    print("Correctness (current vs reference):")
-
-    mismatches = 0
-    for key, ref in released["outputs"].items():
-        cur = local["outputs"][key]
+    common = [key for key in base["outputs"] if key in cand["outputs"]]
+    mismatches = []
+    for key in common:
         try:
-            torch.testing.assert_close(cur, ref)
-            status = "OK"
+            torch.testing.assert_close(cand["outputs"][key], base["outputs"][key])
         except AssertionError as e:
-            mismatches += 1
-            status = f"MISMATCH ({e.args[0].splitlines()[0] if e.args else 'diff'})"
-        print(f"  {key}: {status}")
+            mismatches.append(f"  {' '.join(key)}: {e.args[0].splitlines()[0] if e.args else 'diff'}")
+    print(f"Correctness: {len(common) - len(mismatches)}/{len(common)} cases match")
+    for line in mismatches:
+        print(line)
 
     print()
-    compare = Compare(released["timings"] + local["timings"])
+    compare = Compare(base["timings"] + cand["timings"])
     compare.colorize(rowwise=True)
     compare.print()
+
+    moved = sorted((c for c in _changes(base["timings"], cand["timings"]) if abs(c[0]) > THRESHOLD), reverse=True)
+    if moved:
+        print(f"Medians beyond ±{THRESHOLD:.0%}, candidate vs baseline:")
+        for change, case in moved:
+            print(f"  {change:+7.1%}  {case}")
+    else:
+        print(f"Every median is within ±{THRESHOLD:.0%}.")
+
     if mismatches:
-        print(f"\n{mismatches} correctness mismatch(es).", file=sys.stderr)
+        print(f"\n{len(mismatches)} correctness mismatch(es).", file=sys.stderr)
         sys.exit(1)
-
-
-def _child_main() -> None:
-    """Child entry point: measure one torchdtw version and dump the result. Run by the driver via uv."""
-    parser = argparse.ArgumentParser(description="Measure one torchdtw version (internal child of 'compare').")
-    parser.add_argument("--output", type=Path, required=True, help="Path to write the pickled measurements to.")
-    parser.add_argument("--label", required=True, help="Label identifying this version in the comparison.")
-    parser.add_argument("--min-run-time", type=float, required=True, help="min_run_time for blocked_autorange.")
-    parser.add_argument("--seed", type=int, required=True, help="Seed for the random input tensors.")
-    args = parser.parse_args()
-    measure_and_dump(args.label, args.output, min_run_time=args.min_run_time, seed=args.seed)
 
 
 if __name__ == "__main__":

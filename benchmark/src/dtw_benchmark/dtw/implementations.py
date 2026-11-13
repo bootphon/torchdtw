@@ -1,4 +1,6 @@
-"""Additional implementations of DTW."""
+"""The DTW implementations compared against torchdtw, and ``available`` to pick those that run on a device."""
+
+from collections.abc import Callable
 
 import numba
 import numpy as np
@@ -10,9 +12,16 @@ try:
     import triton
     import triton.language as tl
 except ImportError:
-    pass
+    HAS_TRITON = False
+else:
+    HAS_TRITON = True
+
+import torchdtw
 
 from .dtw_cython import _dtw_cython, _dtw_cython_batch
+
+NAIVE = "PyTorch naive"
+REFERENCE = "PyTorch C++ extension"
 
 
 def dtw_torch(distances: torch.Tensor) -> torch.Tensor:
@@ -58,8 +67,8 @@ def dtw_cython_batch(
     return torch.from_numpy(
         _dtw_cython_batch(
             distances.cpu().numpy(),
-            sx.cpu().numpy(),
-            sy.cpu().numpy(),
+            sx.cpu().numpy().astype(np.intp),
+            sy.cpu().numpy().astype(np.intp),
             symmetric,
         ),
     ).to(distances.device)
@@ -393,3 +402,23 @@ except NameError:
     def dtw_triton_batch(*_args: object, **_kwargs: object) -> torch.Tensor:
         """Act as a placeholder when triton is not found."""
         raise NameError
+
+
+def available(device: torch.device, *, batched: bool) -> dict[str, Callable[..., torch.Tensor]]:
+    """Return the implementations runnable on ``device``, by label, in display order, ending with torchdtw.
+
+    Single-pair implementations take ``(distances)``, batched ones ``(distances, sx, sy, *, symmetric)``. torchdtw is
+    the correctness reference, under ``REFERENCE``. The caller runs the naive loop, ``NAIVE``, on small inputs only.
+    """
+    impls: dict[str, Callable[..., torch.Tensor]]
+    if batched:
+        impls = {"Cython": dtw_cython_batch, "Numba": dtw_numba_batch}
+        if device.type == "cuda" and HAS_TRITON:
+            impls["Triton"] = dtw_triton_batch
+        impls[REFERENCE] = torchdtw.dtw_batch
+    else:
+        impls = {NAIVE: dtw_torch, "Cython": dtw_cython, "Numba": dtw_numba}
+        if device.type == "cuda" and HAS_TRITON:
+            impls["Triton"] = dtw_triton
+        impls[REFERENCE] = torchdtw.dtw
+    return impls

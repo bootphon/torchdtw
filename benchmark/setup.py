@@ -6,8 +6,8 @@ from setuptools import Extension, setup
 setup(
     ext_modules=[
         Extension(
-            "dtw_benchmark.dtw_cython",
-            sources=["src/dtw_benchmark/dtw_cython.pyx"],
+            "dtw_benchmark.dtw.dtw_cython",
+            sources=["src/dtw_benchmark/dtw/dtw_cython.pyx"],
             define_macros=[("Py_LIMITED_API", 0x030C0000)],
             extra_compile_args=["-O3", "-DNPY_NO_DEPRECATED_API=NPY_2_0_API_VERSION"],
             include_dirs=[np.get_include()],
