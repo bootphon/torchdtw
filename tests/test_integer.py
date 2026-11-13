@@ -15,7 +15,7 @@ import torch
 from hypothesis import given
 from hypothesis import strategies as st
 
-from torchdtw import dtw, dtw_batch
+from torchdtw import dtw, dtw_batch, dtw_path
 
 from .conftest import assert_equal, make_tensor
 from .reference import reference_dtw_int
@@ -85,3 +85,16 @@ def test_dtw_narrow_integer_longest_cuda_path(device: str, dtype: torch.dtype) -
     value = torch.iinfo(dtype).max
     d = torch.full((1, 65535), value, dtype=dtype, device=device)
     assert_equal(dtw(d).cpu(), torch.tensor(value, dtype=dtype))
+
+
+@pytest.mark.parametrize("n", [65534, 65535, 70000])
+def test_dtw_int16_long_cpu_path(n: int) -> None:
+    """CPU paths are not capped: past 65535 cells, int16 costs switch from int32 to int64 accumulation.
+
+    A path of n + 1 cells of -32768 overflows int32 from n = 65535 on, on both sides of the switch.
+    """
+    value = torch.iinfo(torch.int16).min
+    d = torch.full((n, 2), value, dtype=torch.int16)
+    assert_equal(dtw(d), torch.tensor(value, dtype=torch.int16))
+    assert_equal(dtw_batch(d[None, None]), torch.full((1, 1), value, dtype=torch.int16))
+    assert dtw_path(d).shape == (n + 1, 2)

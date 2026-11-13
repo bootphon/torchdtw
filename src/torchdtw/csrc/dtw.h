@@ -19,12 +19,12 @@ check_dtw_batch_inputs(const Tensor& distances, const Tensor* sx, const Tensor* 
   return sizes;
 }
 
-template <typename scalar_t>
-TORCHDTW_HOST_DEVICE inline scalar_t normalized_cost(acc_t<scalar_t> cost, int64_t path_len) {
+template <typename scalar_t, typename acc>
+TORCHDTW_HOST_DEVICE inline scalar_t normalized_cost(acc cost, int64_t path_len) {
   if constexpr (std::is_integral_v<scalar_t>) {
     return static_cast<scalar_t>(static_cast<int64_t>(cost) / path_len);
   } else {
-    return static_cast<scalar_t>(cost / static_cast<acc_t<scalar_t>>(path_len));
+    return static_cast<scalar_t>(cost / static_cast<acc>(path_len));
   }
 }
 

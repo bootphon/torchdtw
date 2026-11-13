@@ -20,8 +20,8 @@ template <typename T, size_t N> inline TensorAccessor<T, N> accessor(Tensor t) {
 }
 
 // Accumulation dtype of the DPs, shared by the CPU and GPU backends: float for half/bfloat16, int32 for 8- and 16-bit
-// integers (cannot overflow on CUDA, where paths have at most 65535 cells), int64 for wider integers, scalar_t
-// otherwise.
+// integers (cannot overflow on CUDA, where paths have at most 65535 cells; the CPU switches to int64 for longer paths,
+// see dispatch_acc), int64 for wider integers, scalar_t otherwise.
 template <typename scalar_t>
 using acc_t = std::conditional_t<
     std::is_same_v<scalar_t, torch::headeronly::Half> || std::is_same_v<scalar_t, torch::headeronly::BFloat16>, float,
@@ -178,7 +178,7 @@ inline void parallel_pairs(int64_t n1, int64_t n2, bool symmetric, bool diagonal
   });
 }
 
-template <typename scalar_t> struct PairDistances {
+template <typename scalar_t, typename acc = acc_t<scalar_t>> struct PairDistances {
   const scalar_t* data;
   int64_t stride_i;
   int64_t stride_j;
@@ -186,9 +186,7 @@ template <typename scalar_t> struct PairDistances {
   explicit PairDistances(const TensorAccessor<const scalar_t, 2>& distances)
       : data(distances.data()), stride_i(distances.stride(0)), stride_j(distances.stride(1)) {}
 
-  acc_t<scalar_t> operator()(int64_t i, int64_t j) const {
-    return static_cast<acc_t<scalar_t>>(data[i * stride_i + j * stride_j]);
-  }
+  acc operator()(int64_t i, int64_t j) const { return static_cast<acc>(data[i * stride_i + j * stride_j]); }
 };
 
 #if defined(_MSC_VER)

@@ -2,6 +2,7 @@
 
 #include "dtw.h"
 #include <algorithm>
+#include <limits>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/headeronly/util/Exception.h>
@@ -22,9 +23,8 @@ PyMODINIT_FUNC PyInit__C(void) {
 
 namespace torchdtw {
 
-template <typename scalar_t> struct HardCell {
-  using acc = acc_t<scalar_t>;
-  PairDistances<scalar_t> distances;
+template <typename scalar_t, typename acc> struct HardCell {
+  PairDistances<scalar_t, acc> distances;
 
   acc origin() const { return distances(0, 0); }
   acc edge(int64_t i, int64_t j, acc parent) const { return distances(i, j) + parent; }
@@ -33,10 +33,22 @@ template <typename scalar_t> struct HardCell {
   }
 };
 
-template <typename scalar_t>
-static void
-compute_dtw_cost(const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M, acc_t<scalar_t>* cost) {
-  fill_grid(HardCell<scalar_t>{PairDistances<scalar_t>(distances_a)}, N, M, cost, M);
+template <typename scalar_t, typename acc>
+static void compute_dtw_cost(const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M, acc* cost) {
+  fill_grid(HardCell<scalar_t, acc>{PairDistances<scalar_t, acc>(distances_a)}, N, M, cost, M);
+}
+
+template <typename scalar_t, typename F> static void dispatch_acc(int64_t max_path, const F& f) {
+  using acc = acc_t<scalar_t>;
+  if constexpr (std::is_integral_v<scalar_t> && sizeof(acc) < sizeof(int64_t)) {
+    constexpr int64_t max_abs = std::is_signed_v<scalar_t> ? -static_cast<int64_t>(std::numeric_limits<scalar_t>::min())
+                                                           : static_cast<int64_t>(std::numeric_limits<scalar_t>::max());
+    if (max_path > std::numeric_limits<acc>::max() / max_abs) {
+      f.template operator()<int64_t>();
+      return;
+    }
+  }
+  f.template operator()<acc>();
 }
 
 template <typename cost_t, typename Visit>
@@ -66,14 +78,13 @@ static void trace_dtw_path(const cost_t* cost, int64_t N, int64_t M, Visit&& vis
   }
 }
 
-template <typename scalar_t, bool normalize>
+template <typename scalar_t, typename acc, bool normalize>
 static scalar_t compute_dtw_value(
-    const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M,
-    std::vector<acc_t<scalar_t>>& workspace) {
+    const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M, std::vector<acc>& workspace) {
   if (static_cast<int64_t>(workspace.size()) < N * M) {
     workspace.resize(N * M);
   }
-  compute_dtw_cost<scalar_t>(distances_a, N, M, workspace.data());
+  compute_dtw_cost<scalar_t, acc>(distances_a, N, M, workspace.data());
   if constexpr (!normalize)
     return static_cast<scalar_t>(workspace[N * M - 1]);
   int64_t path_len = 0;
@@ -88,13 +99,15 @@ Tensor dtw_cpu(const Tensor& distances, bool normalize) {
   STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
   Tensor out = torch::stable::new_empty(distances, torch::headeronly::IntHeaderOnlyArrayRef());
   dispatch_dtw(distances.scalar_type(), [&]<typename scalar_t>() {
-    thread_local std::vector<acc_t<scalar_t>> cached;
-    std::vector<acc_t<scalar_t>> temporary;
-    auto& workspace = N * M <= (1 << 20) / static_cast<int64_t>(sizeof(acc_t<scalar_t>)) ? cached : temporary;
-    const auto distances_a = accessor<const scalar_t, 2>(distances);
-    const scalar_t result = normalize ? compute_dtw_value<scalar_t, true>(distances_a, N, M, workspace)
-                                      : compute_dtw_value<scalar_t, false>(distances_a, N, M, workspace);
-    torch::stable::fill_(out, result);
+    dispatch_acc<scalar_t>(N + M - 1, [&]<typename acc>() {
+      thread_local std::vector<acc> cached;
+      std::vector<acc> temporary;
+      auto& workspace = N * M <= (1 << 20) / static_cast<int64_t>(sizeof(acc)) ? cached : temporary;
+      const auto distances_a = accessor<const scalar_t, 2>(distances);
+      const scalar_t result = normalize ? compute_dtw_value<scalar_t, acc, true>(distances_a, N, M, workspace)
+                                        : compute_dtw_value<scalar_t, acc, false>(distances_a, N, M, workspace);
+      torch::stable::fill_(out, result);
+    });
   });
   return out;
 }
@@ -106,10 +119,12 @@ Tensor dtw_path_cpu(const Tensor& distances) {
   STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
   std::vector<std::pair<int64_t, int64_t>> path;
   dispatch_dtw(distances.scalar_type(), [&]<typename scalar_t>() {
-    std::vector<acc_t<scalar_t>> cost(N * M);
-    compute_dtw_cost<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, cost.data());
-    path.reserve(N + M - 1);
-    trace_dtw_path(cost.data(), N, M, [&](int64_t i, int64_t j) { path.push_back({i, j}); });
+    dispatch_acc<scalar_t>(N + M - 1, [&]<typename acc>() {
+      std::vector<acc> cost(N * M);
+      compute_dtw_cost<scalar_t, acc>(accessor<const scalar_t, 2>(distances), N, M, cost.data());
+      path.reserve(N + M - 1);
+      trace_dtw_path(cost.data(), N, M, [&](int64_t i, int64_t j) { path.push_back({i, j}); });
+    });
   });
   std::reverse(path.begin(), path.end());
   Tensor out = torch::stable::new_empty(distances, {(int64_t)path.size(), 2}, torch::headeronly::ScalarType::Long);
@@ -120,19 +135,19 @@ Tensor dtw_path_cpu(const Tensor& distances) {
   return out;
 }
 
-template <typename distances_t, bool normalize>
+template <typename distances_t, typename acc, bool normalize>
 void dtw_batch_cpu_impl(
     Tensor& out, const Tensor& distances, torch::headeronly::IntHeaderOnlyArrayRef sizes, const Lengths sx,
     const Lengths sy, bool symmetric) {
-  using acc = acc_t<distances_t>;
   check_lengths(sx, sy, sizes[0], sizes[1], sizes[2], sizes[3]);
   const auto distances_a = accessor<const distances_t, 4>(distances);
   auto out_a = accessor<distances_t, 2>(out);
   parallel_pairs<acc>(sizes[0], sizes[1], symmetric, false, [&](int64_t x, int64_t y, std::vector<acc>& workspace) {
     const int64_t N = sx[x];
     const int64_t M = sy[y];
-    const distances_t value =
-        N > 0 && M > 0 ? compute_dtw_value<distances_t, normalize>(distances_a[x][y], N, M, workspace) : distances_t(0);
+    const distances_t value = N > 0 && M > 0
+                                  ? compute_dtw_value<distances_t, acc, normalize>(distances_a[x][y], N, M, workspace)
+                                  : distances_t(0);
     out_a[x][y] = value;
     if (symmetric)
       out_a[y][x] = value;
@@ -148,10 +163,12 @@ dtw_batch_cpu(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool 
       symmetric,
       [&]<typename distances_t>(
           Tensor& out, torch::headeronly::IntHeaderOnlyArrayRef sizes, const Lengths& sx_l, const Lengths& sy_l) {
-        if (normalize)
-          dtw_batch_cpu_impl<distances_t, true>(out, distances, sizes, sx_l, sy_l, symmetric);
-        else
-          dtw_batch_cpu_impl<distances_t, false>(out, distances, sizes, sx_l, sy_l, symmetric);
+        dispatch_acc<distances_t>(sizes[2] + sizes[3] - 1, [&]<typename acc>() {
+          if (normalize)
+            dtw_batch_cpu_impl<distances_t, acc, true>(out, distances, sizes, sx_l, sy_l, symmetric);
+          else
+            dtw_batch_cpu_impl<distances_t, acc, false>(out, distances, sizes, sx_l, sy_l, symmetric);
+        });
       });
 }
 
