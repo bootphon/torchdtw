@@ -2,7 +2,9 @@
 
 import os
 import sys
+import warnings
 
+import torch
 from setuptools import Extension, setup
 from torch.utils.cpp_extension import CUDA_HOME, IS_HIP_EXTENSION, BuildExtension, CppExtension, CUDAExtension
 
@@ -20,11 +22,12 @@ def get_flags() -> tuple[list[str], list[str]]:
 
 
 class CUDAArchListError(RuntimeError):
-    """To raise if CUDA is found and TORCH_CUDA_ARCH_LIST is not set."""
+    """To raise if CUDA is found, TORCH_CUDA_ARCH_LIST is not set, and no GPU is visible."""
 
     def __init__(self) -> None:
         super().__init__(
-            "You must explicitly set TORCH_CUDA_ARCH_LIST to build from source if CUDA is found.\n"
+            "Set TORCH_CUDA_ARCH_LIST to build from source if CUDA is found and no GPU is visible.\n"
+            "If a GPU is visible, it defaults to the architectures of the visible GPUs.\n"
             "Check you supported gpu architectures beforehand.\n"
             "For example: TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;9.0;10.0;12.0+PTX'"
         )
@@ -41,6 +44,19 @@ class ROCmArchListError(RuntimeError):
         )
 
 
+def set_default_cuda_arch_list() -> None:
+    """Set TORCH_CUDA_ARCH_LIST to the architectures of the visible GPUs, or raise if there are none."""
+    if torch.cuda.device_count() == 0:
+        raise CUDAArchListError
+    capabilities = sorted({torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())})
+    os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(f"{major}.{minor}" for major, minor in capabilities)
+    warnings.warn(
+        f"TORCH_CUDA_ARCH_LIST is not set, building for the visible GPUs only: {os.environ['TORCH_CUDA_ARCH_LIST']}. "
+        "Set TORCH_CUDA_ARCH_LIST to build for other GPUs.",
+        stacklevel=2,
+    )
+
+
 def get_extensions() -> list[Extension]:
     """Return the CPU extension, plus the CUDA or ROCm extension if a GPU toolkit is found.
 
@@ -50,7 +66,7 @@ def get_extensions() -> list[Extension]:
     use_rocm = IS_HIP_EXTENSION and sys.platform == "linux"
     use_cuda = not use_rocm and CUDA_HOME is not None and sys.platform != "win32"
     if use_cuda and "TORCH_CUDA_ARCH_LIST" not in os.environ:
-        raise CUDAArchListError
+        set_default_cuda_arch_list()
     if use_rocm and "PYTORCH_ROCM_ARCH" not in os.environ:
         raise ROCmArchListError
     compiler_flags, linker_flags = get_flags()

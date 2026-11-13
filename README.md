@@ -100,6 +100,17 @@ loop, amortizing dispatch, allocation, and launch overhead across the whole batc
 Check [this folder](https://github.com/mxmpl/torchdtw/tree/main/benchmark) for comparisons
 against reference implementations.
 
+## Building from source
+
+To build the CUDA backend from source, CUDA must be found by PyTorch (for example
+with `CUDA_HOME`). The GPU architectures to compile for are set by
+`TORCH_CUDA_ARCH_LIST`. If it is not set, the build targets the architectures of the
+visible GPUs only, and fails if no GPU is visible. Set it to build for other GPUs:
+
+```bash
+TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;9.0;10.0;12.0+PTX" pip install --no-build-isolation torchdtw
+```
+
 ## ROCm backend
 
 The published wheels do not include a ROCm backend. To get one, build from source

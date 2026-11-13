@@ -84,6 +84,9 @@ cache-keys = [
   { file = "src/torchdtw/csrc/dtw.cpp" },
   { file = "src/torchdtw/csrc/cuda/dtw.cu" },
   { file = "benchmark/src/dtw_benchmark/dtw_cython.pyx" },
+  { env = "TORCH_CUDA_ARCH_LIST" },
+  { env = "CUDA_HOME" },
+  { env = "PYTORCH_ROCM_ARCH" },
 ]
 
 [tool.uv.workspace]
