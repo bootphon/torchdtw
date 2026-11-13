@@ -93,17 +93,18 @@ template <typename acc_t, typename distances_t> struct HardCell {
   }
 };
 
-// One block per pair. `length_t` is the element type of sx and sy, or void to read them generically, see
-// PairLengths.
-template <typename scalar_t, typename index_t, typename length_t>
+// One block per pair, the launch covering rows [x0, x0 + gridDim.x) of the full grid (see launch_wavefront).
+// `length_t` is the element type of sx and sy, or void to read them generically, see PairLengths.
+template <typename scalar_t, typename index_t, bool global, typename length_t>
 __global__ void dtw_kernel(
     PackedTensorAccessor32<scalar_t, 2> out, const PackedTensorAccessor<scalar_t, 4, index_t> distances,
-    const Lengths sx, const Lengths sy, bool symmetric) {
+    const Lengths sx, const Lengths sy, bool symmetric, unsigned char* scratch, size_t scratch_stride, int64_t x0) {
+  const int32_t row = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
   int32_t x, y;
   if (symmetric) {
-    upper_triangle_pair(static_cast<int32_t>(blockIdx.x), false, x, y);
+    upper_triangle_pair(row, false, x, y);
   } else {
-    x = blockIdx.x;
+    x = row;
     y = blockIdx.y;
   }
   if (x >= out.size(0) || y >= out.size(1))
@@ -122,7 +123,7 @@ __global__ void dtw_kernel(
 
   // Accumulate cost in acc_t<scalar_t> (float for half/bfloat16) to limit rounding drift.
   using acc_t = torchdtw::acc_t<scalar_t>;
-  extern __shared__ unsigned char smem[];
+  unsigned char* const smem = block_diagonals<global>(scratch, scratch_stride);
   const int32_t buf_len = static_cast<int32_t>(distances.size(3));
   acc_t* const cost_smem = reinterpret_cast<acc_t*>(smem);
   // Round the cost buffers' size up to 2 bytes so the uint16_t buffers are aligned for 1-byte dtypes.
@@ -166,36 +167,47 @@ void dtw_batch_cuda_impl(
   const int num_threads = wavefront_threads(max_x, max_y, num_blocks.x);
   const bool needs_64bit = nx * ny * max_x * max_y > std::numeric_limits<int32_t>::max();
   using acc_t = torchdtw::acc_t<distances_t>;
-  // The shared memory budget (MAX_SHARED_BYTES) is shared by 3 cost diagonal buffers and
-  // 3 path-length diagonal buffers, each of length distances.size(3). The buffers are allocated
-  // dynamically at launch so the per-dtype capacity is 49152 / (3 * (sizeof(acc_t) + sizeof(uint16_t))):
-  // 1638 for double, 2730 for float/half/bfloat16. The cost buffers hold the accumulator type
-  // (acc_t<scalar_t>, float for half/bfloat16), not the storage type, so half/bfloat16 share float's
-  // capacity rather than getting the wider 4096 that 2-byte storage would allow.
+  // The diagonals are 3 cost buffers and 3 path-length buffers, each of length distances.size(3). They fit
+  // MAX_SHARED_BYTES up to 49152 / (3 * (sizeof(acc_t) + sizeof(uint16_t))) = 1638 for double, 2730 for
+  // float/half/bfloat16 (whose costs accumulate in float): beyond, see plan_diagonals.
   const size_t cost_bytes = (3 * static_cast<size_t>(max_y) * sizeof(acc_t) + 1) & ~static_cast<size_t>(1);
-  const size_t smem_size = cost_bytes + 3 * static_cast<size_t>(max_y) * sizeof(uint16_t);
-  STD_TORCH_CHECK(
-      smem_size <= MAX_SHARED_BYTES,
-      "distances.size(3) > ",
-      MAX_SHARED_BYTES / (3 * (sizeof(acc_t) + sizeof(uint16_t))),
-      ": too large to use CUDA shared memory for this dtype");
+  const size_t diagonal_bytes = cost_bytes + 3 * static_cast<size_t>(max_y) * sizeof(uint16_t);
+  const DiagonalStorage storage = plan_diagonals(diagonal_bytes);
   const cudaStream_t stream = current_stream();
   // Lengths given as int32 or int64, the usual dtypes, are loaded directly by a kernel specialized for them: the
   // generic run-time switch on their dtype measured ~2.5% slower on small and medium batches, where the kernel's
-  // prologue weighs. Only the 32-bit index kernels are specialized: beyond, batches are large enough for the prologue
-  // not to matter.
+  // prologue weighs. Only the shared memory, 32-bit index kernels are specialized: beyond, sequences or batches are
+  // large enough for the prologue not to matter.
   const bool typed = sx.data != nullptr && sy.data != nullptr && !needs_64bit;
-  auto launch = [&]<typename index_t, typename length_t>() {
-    dtw_kernel<distances_t, index_t, length_t><<<num_blocks, num_threads, smem_size, stream>>>(
-        packed_accessor32<distances_t, 2>(out), packed_accessor<distances_t, 4, index_t>(distances), sx, sy, symmetric);
-  };
-  if (typed && sx.dtype == torch::headeronly::ScalarType::Int)
-    launch.template operator()<int32_t, int32_t>();
-  else if (typed && sx.dtype == torch::headeronly::ScalarType::Long)
-    launch.template operator()<int32_t, int64_t>();
-  else
-    dispatch_index(needs_64bit, [&]<typename index_t>() { launch.template operator()<index_t, void>(); });
-  check_launch("dtw_kernel");
+  const bool int32_lengths = typed && sx.dtype == torch::headeronly::ScalarType::Int;
+  const bool int64_lengths = typed && sx.dtype == torch::headeronly::ScalarType::Long;
+
+  launch_wavefront(
+      distances, storage, num_blocks, [&](auto global, dim3 grid, size_t smem, unsigned char* scratch, int64_t x0) {
+        constexpr bool kGlobal = decltype(global)::value;
+        auto launch = [&]<typename index_t, typename length_t>() {
+          dtw_kernel<distances_t, index_t, kGlobal, length_t><<<grid, num_threads, smem, stream>>>(
+              packed_accessor32<distances_t, 2>(out),
+              packed_accessor<distances_t, 4, index_t>(distances),
+              sx,
+              sy,
+              symmetric,
+              scratch,
+              storage.scratch_stride,
+              x0);
+        };
+        if constexpr (!kGlobal) {
+          if (int32_lengths)
+            launch.template operator()<int32_t, int32_t>();
+          else if (int64_lengths)
+            launch.template operator()<int32_t, int64_t>();
+          else
+            dispatch_index(needs_64bit, [&]<typename index_t>() { launch.template operator()<index_t, void>(); });
+        } else {
+          dispatch_index(needs_64bit, [&]<typename index_t>() { launch.template operator()<index_t, void>(); });
+        }
+        check_launch("dtw_kernel");
+      });
 }
 
 // DTW of each pair of the 4D distances, with lengths sx and sy, which default to the padded sizes when nullptr.

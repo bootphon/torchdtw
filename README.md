@@ -98,6 +98,12 @@ For many DTWs on short sequences, prefer `dtw_batch` over a Python loop of `dtw`
 A single `dtw_batch` launches one CUDA kernel (one block per pair) or one parallel CPU
 loop, amortizing dispatch, allocation, and launch overhead across the whole batch.
 
+On CUDA, each pair is computed by one block, which keeps three anti-diagonals of the
+dynamic program in shared memory when they fit: when `distances.size(-1)` is at most 2730
+for `dtw` and `dtw_batch` in float32, float16 and bfloat16 (1638 in float64).
+Beyond, they are kept in global memory, with no limit on the sequence lengths other than
+`s1 + s2 - 1 <= 65535` for `dtw` and `dtw_batch`.
+
 ## Benchmark
 
 Check [this folder](https://github.com/mxmpl/torchdtw/tree/main/benchmark) for comparisons
