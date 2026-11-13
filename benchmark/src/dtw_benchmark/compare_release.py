@@ -1,11 +1,12 @@
 """Compare dtw and dtw_batch between the current checkout and the latest released torchdtw.
 
 Driven by the ``compare`` subcommand of ``python -m dtw_benchmark`` (the CLI lives in ``__main__``).
-``driver`` spawns a child via ``uv run --with torchdtw==<ver>`` to measure the released version with
-identical inputs, runs the local version the same way, then checks correctness and prints a
-side-by-side timing comparison.
+``driver`` spawns a child via ``uv run --no-project --with torchdtw==<ver>`` to measure the released
+version with identical inputs, measures the torchdtw installed in the current environment in-process
+(so the project is never rebuilt by ``uv run``), then checks correctness and prints a side-by-side
+timing comparison.
 
-Each child runs this module directly as a script (``uv run ... python compare_release.py ...``) in a
+The child runs this module directly as a script (``uv run ... python compare_release.py ...``) in a
 clean environment that only has ``torch`` and ``torchdtw`` installed. Running it as a script puts its
 own directory on ``sys.path``, so it only depends on ``torch`` and ``torchdtw`` -- not the rest of the
 ``dtw_benchmark`` package, which would not be importable there.
@@ -50,7 +51,7 @@ BATCH_CONFIGS = [
 
 def latest_version() -> str:
     """Query PyPI to get the latest torchdtw version."""
-    cmd = ["uv", "run", "--with", "pip", "pip", "index", "versions", "torchdtw", "--json"]
+    cmd = ["uvx", "pip", "index", "versions", "torchdtw", "--json"]
     process = subprocess.run(cmd, check=True, capture_output=True, text=True)
     return json.loads(process.stdout)["latest"]
 
@@ -140,14 +141,17 @@ def measure_all(label: str, *, min_run_time: float, seed: int) -> tuple[dict, li
     return outputs, timings
 
 
+def _installed_version() -> str:
+    try:
+        return version("torchdtw")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def measure_and_dump(label: str, output: str | Path, *, min_run_time: float, seed: int) -> None:
     """Measure 'dtw' and 'dtw_batch' and dump the output with pickle."""
-    try:
-        pkg_version = version("torchdtw")
-    except PackageNotFoundError:
-        pkg_version = "unknown"
     outputs, timings = measure_all(label, min_run_time=min_run_time, seed=seed)
-    dump = pickle.dumps({"label": label, "version": pkg_version, "outputs": outputs, "timings": timings})
+    dump = pickle.dumps({"label": label, "version": _installed_version(), "outputs": outputs, "timings": timings})
     Path(output).write_bytes(dump)
 
 
@@ -190,11 +194,10 @@ def driver(*, min_run_time: float, seed: int, path_wheel: str | Path | None = No
         subprocess.run(released_cmd, check=True)
         released = pickle.loads(released_pkl.read_bytes())
 
-        local_pkl = Path(tmp) / "local.pkl"
-        local_cmd = _measure_command([], output=local_pkl, label="current", min_run_time=min_run_time, seed=seed)
-        print(shlex.join(local_cmd))
-        subprocess.run(local_cmd, check=True)
-        local = pickle.loads(local_pkl.read_bytes())
+    # The current version is measured in-process, with whatever torchdtw is installed in this environment:
+    # no 'uv run' sync, so the project is never rebuilt behind the user's back.
+    outputs, timings = measure_all("current", min_run_time=min_run_time, seed=seed)
+    local = {"version": _installed_version(), "outputs": outputs, "timings": timings}
 
     print(f"Reference torchdtw version: {released['version']}")
     print(f"Current torchdtw version:   {local['version']}")
