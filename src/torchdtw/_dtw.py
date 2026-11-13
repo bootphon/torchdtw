@@ -34,25 +34,37 @@ def dtw_path(distances: torch.Tensor) -> torch.Tensor:
     return torch.ops.torchdtw.dtw_path.default(distances.cpu()).to(distances.device)
 
 
-def dtw_batch(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, *, symmetric: bool) -> torch.Tensor:
+def dtw_batch(
+    distances: torch.Tensor,
+    sx: torch.Tensor | None = None,
+    sy: torch.Tensor | None = None,
+    *,
+    symmetric: bool = False,
+) -> torch.Tensor:
     """Compute the batched DTW cost on the ``distances`` 4D tensor.
 
     Only the ``(sx[i], sy[j])`` sub-block of each pair is read, so padding beyond the sequence
     lengths is ignored. Every ``sx[i]`` must be ``<= s1`` and every ``sy[j] <= s2``: the CPU backend
-    validates this, but the CUDA backend assumes it and reads out of bounds if violated. Use ``+inf``
+    raises an error, and the CUDA backend a device-side assert, if violated. Use ``+inf``
     to mask forbidden alignments. NaN distances are unsupported: the result is unspecified and may
     differ between the CPU and CUDA backends. Integer ``distances`` accumulate the cost in their own
     dtype and may overflow on long sequences; use a wide enough integer dtype or a floating dtype.
 
     :param distances: A 4D tensor of shape (n1, n2, s1, s2) representing the pairwise distances between two
         batches of sequences.
-    :param sx: A 1D tensor of shape (n1,) representing the lengths of the sequences in the first batch.
-    :param sy: A 1D tensor of shape (n2,) representing the lengths of the sequences in the second batch.
-    :param symmetric: Whether or not the DTW is symmetric (i.e., the two batches are the same).
+    :param sx: An optional 1D integer tensor of shape (n1,) with the lengths of the sequences in the first batch.
+        Defaults to s1.
+    :param sy: An optional 1D integer tensor of shape (n2,) with the lengths of the sequences in the second batch.
+        Defaults to s2.
+    :param symmetric: Whether the two batches are the same: only the pairs ``i < j`` are computed, and mirrored,
+        and the diagonal is 0. Requires ``n1 == n2``.
     :returns: A 2D tensor of shape (n1, n2) with the costs.
     """
     check_no_cuda_on_windows(distances)
-    return torch.ops.torchdtw.dtw_batch.default(distances, sx, sy, symmetric)
+    if sx is not None and sy is not None:
+        return torch.ops.torchdtw.dtw_batch.default(distances, sx, sy, symmetric)
+    # A separate overload: the optional lengths of its schema cost ~0.15 microseconds more per call.
+    return torch.ops.torchdtw.dtw_batch.optional_lengths(distances, sx, sy, symmetric)
 
 
 @torch.library.register_fake("torchdtw::dtw")
@@ -63,13 +75,21 @@ def _(distances: torch.Tensor) -> torch.Tensor:
 
 
 @torch.library.register_fake("torchdtw::dtw_batch")
-def _(distances: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, symmetric: bool) -> torch.Tensor:
+@torch.library.register_fake("torchdtw::dtw_batch.optional_lengths")
+def _(
+    distances: torch.Tensor,
+    sx: torch.Tensor | None,
+    sy: torch.Tensor | None,
+    symmetric: bool,
+) -> torch.Tensor:
     """Register the FakeTensor kernel for dtw_batch, for compatibility with torch.compile."""
     torch._check(distances.ndim == 4)
-    torch._check(sx.ndim == 1)
-    torch._check(sy.ndim == 1)
-    torch._check(not (sx.dtype.is_complex or sx.dtype.is_floating_point))
-    torch._check(sx.dtype == sy.dtype)
+    for lengths in (sx, sy):
+        if lengths is not None:
+            torch._check(lengths.ndim == 1)
+            torch._check(not (lengths.dtype.is_complex or lengths.dtype.is_floating_point))
+    if sx is not None and sy is not None:
+        torch._check(sx.dtype == sy.dtype)
     torch._check(isinstance(symmetric, bool))
     nx, ny, _, _ = distances.shape
     return torch.empty((nx, ny), dtype=distances.dtype, layout=distances.layout, device=distances.device)

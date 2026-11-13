@@ -42,14 +42,14 @@ or a floating dtype.
 ### `dtw_batch`
 
 ```python
-dtw_batch(distances, sx, sy, *, symmetric)
+dtw_batch(distances, sx=None, sy=None, *, symmetric=False)
 ```
 
 Compute the batched DTW cost on the ``distances`` 4D tensor.
 
 Only the ``(sx[i], sy[j])`` sub-block of each pair is read, so padding beyond the sequence
 lengths is ignored. Every ``sx[i]`` must be ``<= s1`` and every ``sy[j] <= s2``: the CPU backend
-validates this, but the CUDA backend assumes it and reads out of bounds if violated. Use ``+inf``
+raises an error, and the CUDA backend a device-side assert, if violated. Use ``+inf``
 to mask forbidden alignments. NaN distances are unsupported: the result is unspecified and may
 differ between the CPU and CUDA backends. Integer ``distances`` accumulate the cost in their own
 dtype and may overflow on long sequences; use a wide enough integer dtype or a floating dtype.
@@ -58,9 +58,12 @@ dtype and may overflow on long sequences; use a wide enough integer dtype or a f
 
 - **distances** (<code>Tensor</code>) – A 4D tensor of shape (n1, n2, s1, s2) representing the pairwise distances between two
 batches of sequences.
-- **sx** (<code>Tensor</code>) – A 1D tensor of shape (n1,) representing the lengths of the sequences in the first batch.
-- **sy** (<code>Tensor</code>) – A 1D tensor of shape (n2,) representing the lengths of the sequences in the second batch.
-- **symmetric** (<code>bool</code>) – Whether or not the DTW is symmetric (i.e., the two batches are the same).
+- **sx** (<code>Tensor | None</code>) – An optional 1D integer tensor of shape (n1,) with the lengths of the sequences in the first batch.
+Defaults to s1.
+- **sy** (<code>Tensor | None</code>) – An optional 1D integer tensor of shape (n2,) with the lengths of the sequences in the second batch.
+Defaults to s2.
+- **symmetric** (<code>bool</code>) – Whether the two batches are the same: only the pairs ``i < j`` are computed, and mirrored,
+and the diagonal is 0. Requires ``n1 == n2``.
 
 **Returns:**
 

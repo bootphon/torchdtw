@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/Dispatch_v2.h>
 #include <torch/headeronly/core/ScalarType.h>
@@ -22,6 +23,12 @@ using acc_t = std::conditional_t<
     std::is_same_v<scalar_t, torch::headeronly::Half> || std::is_same_v<scalar_t, torch::headeronly::BFloat16>, float,
     scalar_t>;
 
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#define TORCHDTW_HOST_DEVICE __host__ __device__
+#else
+#define TORCHDTW_HOST_DEVICE
+#endif
+
 // Calls f.template operator()<distances_t>() for the dtype of the distances of the dtw ops.
 template <typename F> void dispatch_dtw(torch::headeronly::ScalarType distances_dtype, const F& f) {
   THO_DISPATCH_V2(
@@ -38,6 +45,91 @@ template <typename F> void dispatch_dtw(torch::headeronly::ScalarType distances_
 #else
 #define TORCHDTW_ALWAYS_INLINE inline __attribute__((always_inline))
 #endif
+
+// Whether sequence lengths can have this dtype: any integer dtype.
+inline bool is_lengths_dtype(torch::headeronly::ScalarType dtype) {
+  using torch::headeronly::ScalarType;
+  return dtype == ScalarType::Byte || dtype == ScalarType::Char || dtype == ScalarType::Short ||
+         dtype == ScalarType::Int || dtype == ScalarType::Long || dtype == ScalarType::UInt16 ||
+         dtype == ScalarType::UInt32 || dtype == ScalarType::UInt64;
+}
+
+// Calls f(T()) with the C++ type T of an integer dtype of sequence lengths.
+template <typename F>
+TORCHDTW_HOST_DEVICE inline int64_t visit_lengths_dtype(torch::headeronly::ScalarType dtype, F f) {
+  using torch::headeronly::ScalarType;
+  switch (dtype) {
+  case ScalarType::Byte:
+    return f(uint8_t());
+  case ScalarType::Char:
+    return f(int8_t());
+  case ScalarType::Short:
+    return f(int16_t());
+  case ScalarType::Int:
+    return f(int32_t());
+  case ScalarType::UInt16:
+    return f(uint16_t());
+  case ScalarType::UInt32:
+    return f(uint32_t());
+  case ScalarType::UInt64:
+    return f(uint64_t());
+  default:
+    return f(int64_t());
+  }
+}
+
+// Checks of the optional lengths sx and sy of the ops, for batch dimensions of sizes nx and ny.
+// The optional lengths are passed by pointer, nullptr when absent: converting the Tensor arguments of dtw_batch's
+// default overload to std::optional copies them, which costs reference counting on every call.
+inline const Tensor* optional_ptr(const std::optional<Tensor>& t) { return t.has_value() ? &t.value() : nullptr; }
+
+inline void check_lengths_tensors(const Tensor& distances, const Tensor* sx, const Tensor* sy, int64_t nx, int64_t ny) {
+  // Each query of a tensor is a call through the stable ABI, measured on the small-batch overhead: query each once.
+  // The device index alone tells CPU (-1) from CUDA devices apart.
+  const int32_t device = distances.get_device();
+  const int64_t sizes[2] = {nx, ny};
+  const Tensor* lengths[2] = {sx, sy};
+  torch::headeronly::ScalarType dtypes[2];
+  for (int k = 0; k < 2; k++) {
+    if (lengths[k] == nullptr)
+      continue;
+    const Tensor& t = *lengths[k];
+    STD_TORCH_CHECK(t.dim() == 1, "sx and sy must be 1D tensors");
+    STD_TORCH_CHECK(t.size(0) == sizes[k], "sx and sy sizes must match the batch dimensions of distances");
+    dtypes[k] = t.scalar_type();
+    STD_TORCH_CHECK(is_lengths_dtype(dtypes[k]), "sx and sy must have an integer dtype");
+    STD_TORCH_CHECK(t.get_device() == device, "sx and sy must be on the same device as distances");
+  }
+  if (sx != nullptr && sy != nullptr)
+    STD_TORCH_CHECK(dtypes[0] == dtypes[1], "sx and sy dtypes do not match");
+}
+
+// Sequence lengths, read from a 1D integer tensor, or all equal to `fallback` (the padded size) when it is absent.
+// The dtype is switched on at run time instead of being a template parameter: kernels are then compiled once instead
+// of once per integer dtype, which divides the size of the binaries.
+struct Lengths {
+  const void* data;
+  int64_t stride;
+  int64_t fallback;
+  torch::headeronly::ScalarType dtype;
+
+  TORCHDTW_HOST_DEVICE int64_t operator[](int64_t i) const {
+    if (data == nullptr)
+      return fallback;
+    return visit_lengths_dtype(
+        dtype, [&](auto t) { return static_cast<int64_t>(static_cast<const decltype(t)*>(data)[i * stride]); });
+  }
+};
+
+inline Lengths make_lengths(const Tensor* t, int64_t fallback) {
+  if (t == nullptr)
+    return {nullptr, 0, fallback, torch::headeronly::ScalarType::Long};
+  return {t->data_ptr(), t->strides()[0], fallback, t->scalar_type()};
+}
+
+inline Lengths make_lengths(const std::optional<Tensor>& t, int64_t fallback) {
+  return make_lengths(optional_ptr(t), fallback);
+}
 
 // Calls f(x, y) on the pairs of flat indices [start, end) of the upper triangle of an n x n grid of pairs, ordered
 // by y: pair (x, y) has index b = y * (y - 1) / 2 + x for x < y, or with the diagonal b = y * (y + 1) / 2 + x for

@@ -5,6 +5,9 @@ Python. None of these were exercised before. Each test triggers exactly one chec
 substring of its message.
 """
 
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
+import sys
+
 import pytest
 import torch
 
@@ -82,11 +85,72 @@ def test_dtw_batch_length_exceeds_block() -> None:
         dtw_batch(d, sx, sy, symmetric=False)
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("symmetric", [False, True])
+def test_dtw_batch_default_lengths(device: str, symmetric: bool) -> None:
+    """Absent sx or sy default to the padded sizes."""
+    d = make_tensor((3, 3, 4, 5), dtype=torch.float32, low=0.0, high=1.0, device=device)
+    sx = torch.full((3,), 4, device=device)
+    sy = torch.full((3,), 5, device=device)
+    expected = dtw_batch(d, sx, sy, symmetric=symmetric)
+    torch.testing.assert_close(dtw_batch(d, symmetric=symmetric), expected, rtol=0, atol=0)
+    torch.testing.assert_close(dtw_batch(d, sx, symmetric=symmetric), expected, rtol=0, atol=0)
+    torch.testing.assert_close(dtw_batch(d, sy=sy, symmetric=symmetric), expected, rtol=0, atol=0)
+
+
+def test_dtw_batch_lengths_must_be_integers() -> None:
+    """dtw_batch rejects floating-point sx and sy."""
+    d, sx, sy = _batch()
+    with pytest.raises(RuntimeError, match="integer dtype"):
+        dtw_batch(d, sx.float(), sy.float(), symmetric=False)
+
+
+@pytest.mark.requires_gpu
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64, torch.int16])
+@pytest.mark.parametrize("symmetric", [False, True])
+def test_dtw_batch_cuda_negative_lengths_are_empty(symmetric: bool, dtype: torch.dtype) -> None:
+    """On CUDA, negative lengths are empty, as on CPU, for the kernels specialized for int32/int64 lengths or not."""
+    d = make_tensor((3, 3, 4, 4), dtype=torch.float32, low=0.0, high=1.0)
+    lengths, empty = torch.tensor([4, -2, 3], dtype=dtype), torch.tensor([4, 0, 3], dtype=dtype)
+    expected = dtw_batch(d, empty, empty, symmetric=symmetric)
+    out = dtw_batch(d.cuda(), lengths.cuda(), lengths.cuda(), symmetric=symmetric)
+    torch.testing.assert_close(out.cpu(), expected)
+
+
+# Each case runs a CUDA op whose lengths exceed the padded sizes. The resulting device-side assert leaves the CUDA
+# context unusable, hence a subprocess per case.
+OUT_OF_RANGE_CASES = {
+    "dtw_batch int32": "torchdtw.dtw_batch(d, torch.tensor([5, 1], dtype=torch.int32, device='cuda'), s32)",
+    "dtw_batch int64": "torchdtw.dtw_batch(d, s64, torch.tensor([1, 5], device='cuda'), symmetric=True)",
+    "dtw_batch int16": "torchdtw.dtw_batch(d, torch.tensor([5, 1], dtype=torch.int16, device='cuda'))",
+}
+
+
+@pytest.mark.requires_gpu
+@pytest.mark.parametrize("call", OUT_OF_RANGE_CASES.values(), ids=OUT_OF_RANGE_CASES.keys())
+def test_cuda_lengths_out_of_range_assert(call: str) -> None:
+    """On CUDA, lengths beyond the padded sizes trigger a device-side assert, where the CPU backend raises."""
+    script = f"""
+import torch, torchdtw
+d = torch.rand(2, 2, 3, 4, device="cuda")
+s32 = torch.tensor([3, 3], dtype=torch.int32, device="cuda")
+s64 = torch.tensor([3, 3], device="cuda")
+{call}
+torch.cuda.synchronize()
+"""
+    # The script is built from the constants above.
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [sys.executable, "-c", script], capture_output=True, text=True, check=False, timeout=120
+    )
+    assert result.returncode != 0
+    assert "must not exceed" in result.stdout + result.stderr
+
+
 @pytest.mark.requires_gpu
 def test_dtw_batch_lengths_must_be_cuda() -> None:
     """On CUDA, dtw_batch requires sx/sy to also be on CUDA."""
     d, sx, sy = _batch()
-    with pytest.raises(RuntimeError, match="must be on CUDA"):
+    with pytest.raises(RuntimeError, match="same device"):
         dtw_batch(d.cuda(), sx, sy, symmetric=False)
 
 

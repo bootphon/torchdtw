@@ -82,7 +82,7 @@ def test_dtw_batch_lengths_must_match_distances_device() -> None:
     d, sx = fixed_batch()
     d = d.to("cuda:0")
     sx_other = sx.to(other)
-    with pytest.raises(RuntimeError, match="same CUDA device"):
+    with pytest.raises(RuntimeError, match="same device"):
         dtw_batch(d, sx_other, sx_other, symmetric=False)
 
 

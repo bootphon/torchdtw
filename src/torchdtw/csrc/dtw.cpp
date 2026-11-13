@@ -5,7 +5,6 @@
 #include <cmath>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
-#include <torch/headeronly/core/Dispatch_v2.h>
 #include <torch/headeronly/util/Exception.h>
 #include <type_traits>
 #include <vector>
@@ -142,31 +141,26 @@ Tensor dtw_path_cpu(const Tensor& distances) {
   return out;
 }
 
-template <typename distances_t, typename sx_t>
-void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+template <typename distances_t>
+void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Lengths sx, const Lengths sy, bool symmetric) {
   const int64_t nx = distances.size(0);
   const int64_t ny = distances.size(1);
-
-  STD_TORCH_CHECK(
-      sy.scalar_type() == torch::headeronly::CppTypeToScalarType<sx_t>::value, "sy dtype does not match sx dtype");
-  const auto sx_a = accessor<const sx_t, 1>(sx);
-  const auto sy_a = accessor<const sx_t, 1>(sy);
   const auto distances_a = accessor<const distances_t, 4>(distances);
   auto out_a = accessor<distances_t, 2>(out);
 
   for (int64_t i = 0; i < nx; i++) {
-    STD_TORCH_CHECK(static_cast<int64_t>(sx_a[i]) <= distances.size(2), "sx values must not exceed distances.size(2)");
+    STD_TORCH_CHECK(sx[i] <= distances.size(2), "sx values must not exceed distances.size(2)");
   }
   for (int64_t j = 0; j < ny; j++) {
-    STD_TORCH_CHECK(static_cast<int64_t>(sy_a[j]) <= distances.size(3), "sy values must not exceed distances.size(3)");
+    STD_TORCH_CHECK(sy[j] <= distances.size(3), "sy values must not exceed distances.size(3)");
   }
 
   if (symmetric) {
     torch::stable::parallel_for(0, nx * (nx - 1) / 2, 1, [&](int64_t start, int64_t end) {
       std::vector<acc_t<distances_t>> workspace;
       for_upper_triangle(start, end, false, [&](int64_t i, int64_t j) {
-        const int64_t N = static_cast<int64_t>(sx_a[i]);
-        const int64_t M = static_cast<int64_t>(sy_a[j]);
+        const int64_t N = sx[i];
+        const int64_t M = sy[j];
         if (N > 0 && M > 0) {
           const distances_t value = compute_dtw_value<distances_t>(distances_a[i][j], N, M, workspace);
           out_a[i][j] = value;
@@ -179,9 +173,9 @@ void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Tensor& sx, 
     torch::stable::parallel_for(0, nx, 1, [&](int64_t start, int64_t end) {
       std::vector<acc_t<distances_t>> workspace;
       for (int64_t i = start; i < end; i++) {
-        const int64_t N = static_cast<int64_t>(sx_a[i]);
+        const int64_t N = sx[i];
         for (int64_t j = 0; j < ny; j++) {
-          const int64_t M = static_cast<int64_t>(sy_a[j]);
+          const int64_t M = sy[j];
           if (N <= 0 || M <= 0)
             continue;
           out_a[i][j] = compute_dtw_value<distances_t>(distances_a[i][j], N, M, workspace);
@@ -191,39 +185,44 @@ void dtw_batch_cpu_impl(Tensor& out, const Tensor& distances, const Tensor& sx, 
   }
 }
 
-Tensor dtw_batch_cpu(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+// dtw_batch, with the lengths sx and sy, nullptr when absent.
+static Tensor dtw_batch_cpu(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric) {
   STD_TORCH_CHECK(distances.dim() == 4, "distances must be a 4D tensor");
-  STD_TORCH_CHECK(sx.dim() == 1 && sy.dim() == 1, "sx and sy must be 1D tensors");
-  STD_TORCH_CHECK(
-      sx.size(0) == distances.size(0) && sy.size(0) == distances.size(1),
-      "sx and sy sizes must match the first two dimensions of distances");
+  check_lengths_tensors(distances, sx, sy, distances.size(0), distances.size(1));
   STD_TORCH_CHECK(
       !symmetric || distances.size(0) == distances.size(1),
       "symmetric dtw_batch requires distances.size(0) == distances.size(1)");
   Tensor out = torch::stable::new_zeros(distances, {distances.size(0), distances.size(1)});
   dispatch_dtw(distances.scalar_type(), [&]<typename distances_t>() {
-    THO_DISPATCH_V2(
-        sx.scalar_type(),
-        "dtw_batch_cpu_impl",
-        AT_WRAP([&] {
-          using sx_t = scalar_t;
-          (dtw_batch_cpu_impl<distances_t, sx_t>(out, distances, sx, sy, symmetric));
-        }),
-        AT_INTEGRAL_TYPES_V2);
+    dtw_batch_cpu_impl<distances_t>(
+        out, distances, make_lengths(sx, distances.size(2)), make_lengths(sy, distances.size(3)), symmetric);
   });
   return out;
+}
+
+// The default overload of dtw_batch, with both lengths. Missing lengths go through the optional_lengths overload:
+// Tensor? arguments measured ~0.15 µs more per call than Tensor ones, ~2% of a small batch on CUDA.
+Tensor dtw_batch_lengths_cpu(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
+  return dtw_batch_cpu(distances, &sx, &sy, symmetric);
+}
+
+Tensor dtw_batch_optional_lengths_cpu(
+    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, bool symmetric) {
+  return dtw_batch_cpu(distances, optional_ptr(sx), optional_ptr(sy), symmetric);
 }
 
 STABLE_TORCH_LIBRARY(torchdtw, m) {
   m.def("dtw(Tensor distances) -> Tensor");
   m.def("dtw_path(Tensor distances) -> Tensor");
   m.def("dtw_batch(Tensor distances, Tensor sx, Tensor sy, bool symmetric) -> Tensor");
+  m.def("dtw_batch.optional_lengths(Tensor distances, Tensor? sx, Tensor? sy, bool symmetric) -> Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(torchdtw, CPU, m) {
   m.impl("dtw", &TORCH_BOX(dtw_cpu));
   m.impl("dtw_path", &TORCH_BOX(dtw_path_cpu));
-  m.impl("dtw_batch", &TORCH_BOX(dtw_batch_cpu));
+  m.impl("dtw_batch", &TORCH_BOX(dtw_batch_lengths_cpu));
+  m.impl("dtw_batch.optional_lengths", &TORCH_BOX(dtw_batch_optional_lengths_cpu));
 }
 
 } // namespace torchdtw

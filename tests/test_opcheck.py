@@ -65,3 +65,15 @@ def test_opcheck_dtw_batch_not_symmetric_cuda(
     sx = make_tensor((n,), dtype=torch.long, low=1, high=x)
     sy = make_tensor((m,), dtype=torch.long, low=1, high=y)
     opcheck(torch.ops.torchdtw.dtw_batch.default, (sample.cuda(), sx.cuda(), sy.cuda()), {"symmetric": False})
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@given(n=BATCH, m=BATCH, x=DIM, y=DIM, low=LOW, high_minus_low=HIGH_MINUS_LOW)
+def test_opcheck_dtw_batch_without_lengths(
+    device: str, n: int, m: int, x: int, y: int, low: float, high_minus_low: float
+) -> None:
+    """Verify that dtw_batch without sx, or sy, can be torch compiled."""
+    sample = make_tensor((n, m, x, y), dtype=torch.float32, low=low, high=high_minus_low + low, device=device)
+    sy = make_tensor((m,), dtype=torch.long, low=1, high=y, device=device)
+    opcheck(torch.ops.torchdtw.dtw_batch.optional_lengths, (sample, None, None), {"symmetric": False})
+    opcheck(torch.ops.torchdtw.dtw_batch.optional_lengths, (sample, None, sy), {"symmetric": False})

@@ -4,7 +4,9 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/macros/Macros.h>
 #include <torch/headeronly/util/Exception.h>
+#include <type_traits>
 
 // Default shared memory budget of 48KiB per block, available without opting in to a larger carveout.
 #define MAX_SHARED_BYTES 49152
@@ -59,7 +61,7 @@ inline int wavefront_threads(int64_t max_x, int64_t max_y, unsigned int num_bloc
   constexpr int64_t max_grid_threads = 4294967295; // 2^32 - 1
   STD_TORCH_CHECK(
       static_cast<int64_t>(num_blocks) * num_threads <= max_grid_threads,
-      "dtw_batch too large: the number of threads exceeds the HIP grid limit of 2^32-1, got ",
+      "Too many threads: the grid exceeds the HIP limit of 2^32-1 threads per dimension, got ",
       static_cast<int64_t>(num_blocks),
       " blocks of ",
       num_threads,
@@ -76,6 +78,65 @@ inline dim3 pair_grid(int64_t n1, int64_t n2) {
   STD_TORCH_CHECK(n2 <= max_grid_y, "distances.size(1) exceeds the CUDA grid limit of 65535");
   return dim3(static_cast<unsigned int>(n1), static_cast<unsigned int>(n2));
 }
+
+// The lengths sx[x] and sy[y] of the pair of a block. Negative lengths are empty. Lengths beyond the padded size,
+// which the CPU backend rejects, trigger a device-side assert, as out-of-range indices do in PyTorch's own CUDA
+// kernels: checking them on the host would need a synchronization, and clamping them silently would hide the error.
+//
+// The kernels never read out of bounds: such pairs are skipped as empty ones, see empty(). This runs as fast as no
+// check at all, through the DP loops that depend on N and M: clamping N and M to the padded sizes instead made hard
+// DTW ~1% slower on small batches. `clamp` must be false. The assert runs when the kernel exits, in the destructor:
+// asserting where the lengths are read made the compiler reserve the registers of the assert's function call over the
+// whole DP loop, +8 registers and ~3% slower.
+// Both lengths are loaded, in their own type, under a single switch on their dtype (sx and sy have the same dtype when
+// both are present), before any conversion: otherwise the conversion of the first waits for its load before the
+// second is issued, measured ~1% slower on small batches.
+// `length_t` is the element type of both sx and sy, when the kernel is specialized for it and both are present: they
+// are then loaded directly. It is void for the generic path, which switches on their dtype at run time.
+template <bool clamp, typename length_t = void> struct PairLengths {
+  static_assert(!clamp, "clamped lengths are not implemented");
+
+  int32_t N;
+  int32_t M;
+  bool in_range;
+
+  __device__ __forceinline__ PairLengths(const Lengths& sx, int64_t x, const Lengths& sy, int64_t y) {
+    if constexpr (std::is_void_v<length_t>) {
+      int64_t m;
+      const int64_t n = visit_lengths_dtype(sx.data != nullptr ? sx.dtype : sy.dtype, [&](auto t) {
+        using T = decltype(t);
+        const T* const px = static_cast<const T*>(sx.data);
+        const T* const py = static_cast<const T*>(sy.data);
+        const T a = px != nullptr ? px[x * sx.stride] : T();
+        const T b = py != nullptr ? py[y * sy.stride] : T();
+        m = py != nullptr ? static_cast<int64_t>(b) : sy.fallback;
+        return px != nullptr ? static_cast<int64_t>(a) : sx.fallback;
+      });
+      in_range = n <= sx.fallback && m <= sy.fallback;
+      N = static_cast<int32_t>(n);
+      M = static_cast<int32_t>(m);
+    } else {
+      const length_t n = static_cast<const length_t*>(sx.data)[x * sx.stride];
+      const length_t m = static_cast<const length_t*>(sy.data)[y * sy.stride];
+      // These kernels index the distances in int32, so their padded sizes fit in length_t: compared in it, the
+      // lengths need no widening, which made int32 lengths ~1% slower on small batches.
+      in_range = n <= static_cast<length_t>(sx.fallback) && m <= static_cast<length_t>(sy.fallback);
+      N = static_cast<int32_t>(n);
+      M = static_cast<int32_t>(m);
+    }
+  }
+
+  // Whether the pair has no cell to compute: a length is not positive, or out of range.
+  __device__ __forceinline__ bool empty() const { return N <= 0 || M <= 0 || !in_range; }
+
+  __device__ __forceinline__ ~PairLengths() {
+    if (threadIdx.x == 0)
+      CUDA_KERNEL_ASSERT_MSG(in_range, "sx and sy values must not exceed distances.size(-2) and distances.size(-1)");
+  }
+
+  PairLengths(const PairLengths&) = delete;
+  PairLengths& operator=(const PairLengths&) = delete;
+};
 
 // Grid of a kernel with one block per pair x < y (x <= y with the diagonal) of an n x n batch, see
 // upper_triangle_pair.
