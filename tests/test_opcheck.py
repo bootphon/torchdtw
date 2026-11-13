@@ -103,3 +103,14 @@ def test_fake_dtw_batch_rejects_like_cpu(args: tuple, match: str) -> None:
         op(*args)
     with FakeTensorMode() as mode, pytest.raises(RuntimeError, match=match):
         op(*(mode.from_tensor(a) if isinstance(a, torch.Tensor) else a for a in args))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+def test_opcheck_unnormalized(device: str) -> None:
+    """Both ops can be torch compiled with normalize=False."""
+    sample = make_tensor((2, 3, 5, 7), dtype=torch.float32, low=0, high=1, device=device)
+    sx = make_tensor((2,), dtype=torch.long, low=1, high=5, device=device)
+    sy = make_tensor((3,), dtype=torch.long, low=1, high=7, device=device)
+    opcheck(torch.ops.torchdtw.dtw.default, (sample[0, 0], False))
+    opcheck(torch.ops.torchdtw.dtw_batch.default, (sample, sx, sy, False, False))
+    opcheck(torch.ops.torchdtw.dtw_batch.optional_lengths, (sample, None, sy, False, False))

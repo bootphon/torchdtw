@@ -66,7 +66,7 @@ static void trace_dtw_path(const cost_t* cost, int64_t N, int64_t M, Visit&& vis
   }
 }
 
-template <typename scalar_t>
+template <typename scalar_t, bool normalize>
 static scalar_t compute_dtw_value(
     const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N, int64_t M,
     std::vector<acc_t<scalar_t>>& workspace) {
@@ -74,12 +74,14 @@ static scalar_t compute_dtw_value(
     workspace.resize(N * M);
   }
   compute_dtw_cost<scalar_t>(distances_a, N, M, workspace.data());
+  if constexpr (!normalize)
+    return static_cast<scalar_t>(workspace[N * M - 1]);
   int64_t path_len = 0;
   trace_dtw_path(workspace.data(), N, M, [&](int64_t, int64_t) { path_len++; });
   return normalized_cost<scalar_t>(workspace[N * M - 1], path_len);
 }
 
-Tensor dtw_cpu(const Tensor& distances) {
+Tensor dtw_cpu(const Tensor& distances, bool normalize) {
   STD_TORCH_CHECK(distances.dim() == 2, "distances must be a 2D tensor");
   const int64_t N = distances.size(0);
   const int64_t M = distances.size(1);
@@ -89,7 +91,9 @@ Tensor dtw_cpu(const Tensor& distances) {
     thread_local std::vector<acc_t<scalar_t>> cached;
     std::vector<acc_t<scalar_t>> temporary;
     auto& workspace = N * M <= (1 << 20) / static_cast<int64_t>(sizeof(acc_t<scalar_t>)) ? cached : temporary;
-    const scalar_t result = compute_dtw_value<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, workspace);
+    const auto distances_a = accessor<const scalar_t, 2>(distances);
+    const scalar_t result = normalize ? compute_dtw_value<scalar_t, true>(distances_a, N, M, workspace)
+                                      : compute_dtw_value<scalar_t, false>(distances_a, N, M, workspace);
     torch::stable::fill_(out, result);
   });
   return out;
@@ -116,7 +120,7 @@ Tensor dtw_path_cpu(const Tensor& distances) {
   return out;
 }
 
-template <typename distances_t>
+template <typename distances_t, bool normalize>
 void dtw_batch_cpu_impl(
     Tensor& out, const Tensor& distances, torch::headeronly::IntHeaderOnlyArrayRef sizes, const Lengths sx,
     const Lengths sy, bool symmetric) {
@@ -128,14 +132,15 @@ void dtw_batch_cpu_impl(
     const int64_t N = sx[x];
     const int64_t M = sy[y];
     const distances_t value =
-        N > 0 && M > 0 ? compute_dtw_value<distances_t>(distances_a[x][y], N, M, workspace) : distances_t(0);
+        N > 0 && M > 0 ? compute_dtw_value<distances_t, normalize>(distances_a[x][y], N, M, workspace) : distances_t(0);
     out_a[x][y] = value;
     if (symmetric)
       out_a[y][x] = value;
   });
 }
 
-static Tensor dtw_batch_cpu(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric) {
+static Tensor
+dtw_batch_cpu(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric, bool normalize) {
   return dtw_batch_op(
       distances,
       sx,
@@ -143,24 +148,31 @@ static Tensor dtw_batch_cpu(const Tensor& distances, const Tensor* sx, const Ten
       symmetric,
       [&]<typename distances_t>(
           Tensor& out, torch::headeronly::IntHeaderOnlyArrayRef sizes, const Lengths& sx_l, const Lengths& sy_l) {
-        dtw_batch_cpu_impl<distances_t>(out, distances, sizes, sx_l, sy_l, symmetric);
+        if (normalize)
+          dtw_batch_cpu_impl<distances_t, true>(out, distances, sizes, sx_l, sy_l, symmetric);
+        else
+          dtw_batch_cpu_impl<distances_t, false>(out, distances, sizes, sx_l, sy_l, symmetric);
       });
 }
 
-Tensor dtw_batch_lengths_cpu(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
-  return dtw_batch_cpu(distances, &sx, &sy, symmetric);
+Tensor
+dtw_batch_lengths_cpu(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric, bool normalize) {
+  return dtw_batch_cpu(distances, &sx, &sy, symmetric, normalize);
 }
 
 Tensor dtw_batch_optional_lengths_cpu(
-    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, bool symmetric) {
-  return dtw_batch_cpu(distances, optional_ptr(sx), optional_ptr(sy), symmetric);
+    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, bool symmetric,
+    bool normalize) {
+  return dtw_batch_cpu(distances, optional_ptr(sx), optional_ptr(sy), symmetric, normalize);
 }
 
 STABLE_TORCH_LIBRARY(torchdtw, m) {
-  m.def("dtw(Tensor distances) -> Tensor");
+  m.def("dtw(Tensor distances, bool normalize=True) -> Tensor");
   m.def("dtw_path(Tensor distances) -> Tensor");
-  m.def("dtw_batch(Tensor distances, Tensor sx, Tensor sy, bool symmetric) -> Tensor");
-  m.def("dtw_batch.optional_lengths(Tensor distances, Tensor? sx, Tensor? sy, bool symmetric) -> Tensor");
+  m.def("dtw_batch(Tensor distances, Tensor sx, Tensor sy, bool symmetric, bool normalize=True) -> Tensor");
+  m.def(
+      "dtw_batch.optional_lengths(Tensor distances, Tensor? sx, Tensor? sy, bool symmetric, bool normalize=True) -> "
+      "Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(torchdtw, CPU, m) {

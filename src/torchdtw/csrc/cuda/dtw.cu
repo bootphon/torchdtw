@@ -90,8 +90,8 @@ template <typename acc_t, typename distances_t> struct HardCell {
 template <typename scalar_t, typename index_t, bool global, typename length_t>
 __global__ void dtw_kernel(
     PackedTensorAccessor<scalar_t, 2, index_t> out, const PackedTensorAccessor<scalar_t, 4, index_t> distances,
-    const Lengths sx, const Lengths sy, bool symmetric, unsigned char* scratch, size_t scratch_stride, int64_t x0,
-    int64_t y0) {
+    const Lengths sx, const Lengths sy, bool symmetric, bool normalize, unsigned char* scratch, size_t scratch_stride,
+    int64_t x0, int64_t y0) {
   int32_t x, y;
   block_pair(symmetric, false, x0, y0, x, y);
   if (x >= out.size(0) || y >= out.size(1))
@@ -125,7 +125,8 @@ __global__ void dtw_kernel(
   wavefront(cell, N, M);
 
   if (threadIdx.x == 0) {
-    const scalar_t result = normalized_cost<scalar_t>(cell.cost_alpha[M - 1], cell.len_alpha[M - 1]);
+    const scalar_t result = normalize ? normalized_cost<scalar_t>(cell.cost_alpha[M - 1], cell.len_alpha[M - 1])
+                                      : static_cast<scalar_t>(cell.cost_alpha[M - 1]);
     out[x][y] = result;
     if (symmetric)
       out[y][x] = result;
@@ -134,7 +135,7 @@ __global__ void dtw_kernel(
 
 template <typename distances_t>
 void dtw_batch_cuda_impl(
-    Tensor& out, const Tensor& distances, const Lengths sx, const Lengths sy, bool symmetric,
+    Tensor& out, const Tensor& distances, const Lengths sx, const Lengths sy, bool symmetric, bool normalize,
     const WavefrontLaunch& launch) {
   const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
   const DiagonalStorage storage = plan_diagonals(launch.diagonal_bytes);
@@ -156,6 +157,7 @@ void dtw_batch_cuda_impl(
               sx,
               sy,
               symmetric,
+              normalize,
               scratch,
               storage.scratch_stride,
               x0,
@@ -177,7 +179,8 @@ void dtw_batch_cuda_impl(
       });
 }
 
-static Tensor dtw_batch_cuda(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric) {
+static Tensor
+dtw_batch_cuda(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric, bool normalize) {
   return dtw_batch_op(
       distances,
       sx,
@@ -198,25 +201,34 @@ static Tensor dtw_batch_cuda(const Tensor& distances, const Tensor* sx, const Te
         const size_t cost_bytes = (3 * static_cast<size_t>(s2) * sizeof(acc_t) + 1) & ~static_cast<size_t>(1);
         const size_t diagonal_bytes = cost_bytes + 3 * static_cast<size_t>(s2) * sizeof(uint16_t);
         dtw_batch_cuda_impl<distances_t>(
-            out, distances, sx_l, sy_l, symmetric, plan_wavefront(distances, sizes, symmetric, false, diagonal_bytes));
+            out,
+            distances,
+            sx_l,
+            sy_l,
+            symmetric,
+            normalize,
+            plan_wavefront(distances, sizes, symmetric, false, diagonal_bytes));
       });
 }
 
-Tensor dtw_batch_lengths_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
-  return dtw_batch_cuda(distances, &sx, &sy, symmetric);
+Tensor
+dtw_batch_lengths_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric, bool normalize) {
+  return dtw_batch_cuda(distances, &sx, &sy, symmetric, normalize);
 }
 
 Tensor dtw_batch_optional_lengths_cuda(
-    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, bool symmetric) {
-  return dtw_batch_cuda(distances, optional_ptr(sx), optional_ptr(sy), symmetric);
+    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, bool symmetric,
+    bool normalize) {
+  return dtw_batch_cuda(distances, optional_ptr(sx), optional_ptr(sy), symmetric, normalize);
 }
 
-Tensor dtw_cuda(const Tensor& distances) {
+Tensor dtw_cuda(const Tensor& distances, bool normalize) {
   STD_TORCH_CHECK(distances.dim() == 2, "distances must be a 2D tensor");
   const int64_t N = distances.size(0);
   const int64_t M = distances.size(1);
   STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
-  const Tensor result = dtw_batch_cuda(torch::stable::view(distances, {1, 1, N, M}), nullptr, nullptr, false);
+  const Tensor result =
+      dtw_batch_cuda(torch::stable::view(distances, {1, 1, N, M}), nullptr, nullptr, false, normalize);
   return torch::stable::view(result, torch::headeronly::IntHeaderOnlyArrayRef());
 }
 

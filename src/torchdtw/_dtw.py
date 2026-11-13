@@ -7,17 +7,18 @@ from ._windows import check_no_cuda_on_windows
 __all__ = ["dtw", "dtw_batch", "dtw_path"]
 
 
-def dtw(distances: torch.Tensor) -> torch.Tensor:
+def dtw(distances: torch.Tensor, *, normalize: bool = True) -> torch.Tensor:
     """Compute the DTW cost of the given ``distances`` 2D tensor.
 
     Use ``+inf`` to mask forbidden alignments. NaN distances are unsupported: the result is
     unspecified and may differ between the CPU and CUDA backends.
 
     :param distances: A 2D tensor of shape (n, m) representing the pairwise distances between two sequences.
+    :param normalize: Whether to divide the cost by the length of the warping path.
     :returns: A scalar tensor with the cost.
     """
     check_no_cuda_on_windows(distances)
-    return torch.ops.torchdtw.dtw.default(distances)
+    return torch.ops.torchdtw.dtw.default(distances, normalize)
 
 
 def dtw_path(distances: torch.Tensor) -> torch.Tensor:
@@ -38,6 +39,7 @@ def dtw_batch(
     sy: torch.Tensor | None = None,
     *,
     symmetric: bool = False,
+    normalize: bool = True,
 ) -> torch.Tensor:
     """Compute the batched DTW cost on the ``distances`` 4D tensor.
 
@@ -54,12 +56,13 @@ def dtw_batch(
         Defaults to s2.
     :param symmetric: Whether the two batches are the same: only the pairs ``i < j`` are computed, and mirrored,
         and the diagonal is 0. Requires ``n1 == n2``.
+    :param normalize: Whether to divide each cost by the length of its warping path.
     :returns: A 2D tensor of shape (n1, n2) with the costs.
     """
     check_no_cuda_on_windows(distances)
     if sx is not None and sy is not None:
-        return torch.ops.torchdtw.dtw_batch.default(distances, sx, sy, symmetric)
-    return torch.ops.torchdtw.dtw_batch.optional_lengths(distances, sx, sy, symmetric)
+        return torch.ops.torchdtw.dtw_batch.default(distances, sx, sy, symmetric, normalize)
+    return torch.ops.torchdtw.dtw_batch.optional_lengths(distances, sx, sy, symmetric, normalize)
 
 
 _DISTANCES_DTYPES = (
@@ -86,7 +89,7 @@ _LENGTHS_DTYPES = (
 
 
 @torch.library.register_fake("torchdtw::dtw")
-def _(distances: torch.Tensor) -> torch.Tensor:
+def _(distances: torch.Tensor, normalize: bool = True) -> torch.Tensor:
     """Register the FakeTensor kernel for dtw, for compatibility with torch.compile."""
     torch._check(distances.ndim == 2, lambda: "distances must be a 2D tensor")
     torch._check(distances.dtype in _DISTANCES_DTYPES, lambda: f"dtw not implemented for {distances.dtype}")
@@ -100,6 +103,7 @@ def _(
     sx: torch.Tensor | None,
     sy: torch.Tensor | None,
     symmetric: bool,
+    normalize: bool = True,
 ) -> torch.Tensor:
     """Register the FakeTensor kernel for dtw_batch, for compatibility with torch.compile."""
     torch._check(distances.ndim == 4, lambda: "distances must be a 4D tensor")

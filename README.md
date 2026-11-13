@@ -21,7 +21,7 @@ This package provides:
 ### `dtw`
 
 ```python
-dtw(distances)
+dtw(distances, *, normalize=True)
 ```
 
 Compute the DTW cost of the given ``distances`` 2D tensor.
@@ -32,6 +32,7 @@ unspecified and may differ between the CPU and CUDA backends.
 **Parameters:**
 
 - **distances** (<code>Tensor</code>) – A 2D tensor of shape (n, m) representing the pairwise distances between two sequences.
+- **normalize** (<code>bool</code>) – Whether to divide the cost by the length of the warping path.
 
 **Returns:**
 
@@ -40,7 +41,7 @@ unspecified and may differ between the CPU and CUDA backends.
 ### `dtw_batch`
 
 ```python
-dtw_batch(distances, sx=None, sy=None, *, symmetric=False)
+dtw_batch(distances, sx=None, sy=None, *, symmetric=False, normalize=True)
 ```
 
 Compute the batched DTW cost on the ``distances`` 4D tensor.
@@ -60,6 +61,7 @@ Defaults to s1.
 Defaults to s2.
 - **symmetric** (<code>bool</code>) – Whether the two batches are the same: only the pairs ``i < j`` are computed, and mirrored,
 and the diagonal is 0. Requires ``n1 == n2``.
+- **normalize** (<code>bool</code>) – Whether to divide each cost by the length of its warping path.
 
 **Returns:**
 

@@ -12,10 +12,10 @@ import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from torchdtw import dtw, dtw_batch
+from torchdtw import dtw, dtw_batch, dtw_path
 
 from .conftest import HIGH_MINUS_LOW, LOW, assert_equal, make_tensor
-from .reference import reference_dtw, reference_dtw_batch
+from .reference import reference_cost, reference_dtw, reference_dtw_batch
 
 # Pure-Python reference loops over every cell, so keep the oracle dimensions small.
 ORACLE_DIM = st.integers(1, 64)
@@ -76,3 +76,32 @@ def test_dtw_batch_symmetric_matches_reference(n: int, x: int, low: float, high_
     sx = make_tensor((n,), dtype=torch.long, low=0, high=x + 1)
     expected = torch.from_numpy(reference_dtw_batch(d.numpy(), sx.numpy(), sx.numpy(), symmetric=True))
     assert_equal(dtw_batch(d, sx, sx, symmetric=True), expected)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@settings(max_examples=30)
+@given(n=ORACLE_BATCH, m=ORACLE_BATCH, x=ORACLE_BATCH_DIM, y=ORACLE_BATCH_DIM)
+def test_unnormalized_cost_matches_reference(device: str, n: int, m: int, x: int, y: int) -> None:
+    """normalize=False returns the accumulated cost, without the division by the path length."""
+    d = make_tensor((n, m, x, y), dtype=torch.float64, low=0, high=10)
+    sx = make_tensor((n,), dtype=torch.int32, low=0, high=x + 1)
+    sy = make_tensor((m,), dtype=torch.int32, low=0, high=y + 1)
+    expected = torch.zeros((n, m), dtype=torch.float64)
+    for i in range(n):
+        for j in range(m):
+            if sx[i] > 0 and sy[j] > 0:
+                expected[i, j] = float(reference_cost(d[i, j, : sx[i], : sy[j]].numpy())[-1, -1])
+    out = dtw_batch(d.to(device), sx.to(device), sy.to(device), normalize=False)
+    torch.testing.assert_close(out.cpu(), expected)
+    torch.testing.assert_close(
+        dtw(d[0, 0].to(device), normalize=False).cpu(),
+        torch.tensor(float(reference_cost(d[0, 0].numpy())[-1, -1]), dtype=torch.float64),
+    )
+
+
+@pytest.mark.parametrize(("matrix", "expected"), HAND_EXAMPLES)
+def test_dtw_hand_examples_unnormalized(matrix: list[list[float]], expected: float) -> None:
+    """Without normalization, the hand examples give their corner cost: the normalized cost times the path length."""
+    d = torch.tensor(matrix, dtype=torch.float64)
+    path_len = len(dtw_path(d))
+    assert_equal(dtw(d, normalize=False), torch.tensor(expected * path_len, dtype=torch.float64))
