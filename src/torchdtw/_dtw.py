@@ -63,7 +63,6 @@ def dtw_batch(
     check_no_cuda_on_windows(distances)
     if sx is not None and sy is not None:
         return torch.ops.torchdtw.dtw_batch.default(distances, sx, sy, symmetric)
-    # A separate overload: the optional lengths of its schema cost ~0.15 microseconds more per call.
     return torch.ops.torchdtw.dtw_batch.optional_lengths(distances, sx, sy, symmetric)
 
 

@@ -25,13 +25,6 @@ using acc_t = std::conditional_t<
     std::is_same_v<scalar_t, torch::headeronly::Half> || std::is_same_v<scalar_t, torch::headeronly::BFloat16>, float,
     scalar_t>;
 
-#if defined(__CUDACC__) || defined(__HIPCC__)
-#define TORCHDTW_HOST_DEVICE __host__ __device__
-#else
-#define TORCHDTW_HOST_DEVICE
-#endif
-
-// Calls f.template operator()<distances_t>() for the dtype of the distances of the dtw ops.
 template <typename F> void dispatch_dtw(torch::headeronly::ScalarType distances_dtype, const F& f) {
   THO_DISPATCH_V2(
       distances_dtype,
@@ -42,13 +35,6 @@ template <typename F> void dispatch_dtw(torch::headeronly::ScalarType distances_
       torch::headeronly::ScalarType::BFloat16);
 }
 
-#if defined(_MSC_VER)
-#define TORCHDTW_ALWAYS_INLINE __forceinline
-#else
-#define TORCHDTW_ALWAYS_INLINE inline __attribute__((always_inline))
-#endif
-
-// Whether sequence lengths can have this dtype: any integer dtype.
 inline bool is_lengths_dtype(torch::headeronly::ScalarType dtype) {
   using torch::headeronly::ScalarType;
   return dtype == ScalarType::Byte || dtype == ScalarType::Char || dtype == ScalarType::Short ||
@@ -56,7 +42,12 @@ inline bool is_lengths_dtype(torch::headeronly::ScalarType dtype) {
          dtype == ScalarType::UInt32 || dtype == ScalarType::UInt64;
 }
 
-// Calls f(T()) with the C++ type T of an integer dtype of sequence lengths.
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#define TORCHDTW_HOST_DEVICE __host__ __device__
+#else
+#define TORCHDTW_HOST_DEVICE
+#endif
+
 template <typename F>
 TORCHDTW_HOST_DEVICE inline int64_t visit_lengths_dtype(torch::headeronly::ScalarType dtype, F f) {
   using torch::headeronly::ScalarType;
@@ -80,14 +71,9 @@ TORCHDTW_HOST_DEVICE inline int64_t visit_lengths_dtype(torch::headeronly::Scala
   }
 }
 
-// Checks of the optional lengths sx and sy of the ops, for batch dimensions of sizes nx and ny.
-// The optional lengths are passed by pointer, nullptr when absent: converting the Tensor arguments of dtw_batch's
-// default overload to std::optional copies them, which costs reference counting on every call.
 inline const Tensor* optional_ptr(const std::optional<Tensor>& t) { return t.has_value() ? &t.value() : nullptr; }
 
 inline void check_lengths_tensors(const Tensor& distances, const Tensor* sx, const Tensor* sy, int64_t nx, int64_t ny) {
-  // Each query of a tensor is a call through the stable ABI, measured on the small-batch overhead: query each once.
-  // The device index alone tells CPU (-1) from CUDA devices apart.
   const int32_t device = distances.get_device();
   const int64_t sizes[2] = {nx, ny};
   const Tensor* lengths[2] = {sx, sy};
@@ -106,9 +92,6 @@ inline void check_lengths_tensors(const Tensor& distances, const Tensor* sx, con
     STD_TORCH_CHECK(dtypes[0] == dtypes[1], "sx and sy dtypes do not match");
 }
 
-// Sequence lengths, read from a 1D integer tensor, or all equal to `fallback` (the padded size) when it is absent.
-// The dtype is switched on at run time instead of being a template parameter: kernels are then compiled once instead
-// of once per integer dtype, which divides the size of the binaries.
 struct Lengths {
   const void* data;
   int64_t stride;
@@ -118,8 +101,6 @@ struct Lengths {
   TORCHDTW_HOST_DEVICE int64_t operator[](int64_t i) const {
     if (data == nullptr)
       return fallback;
-    // int32 and int64, the usual dtypes, are tested before the switch: read once per pair, between two DPs, the
-    // indirect jump of its jump table was mispredicted, ~4% slower on CPU batches of 32 x 32 pairs.
     if (dtype == torch::headeronly::ScalarType::Int)
       return static_cast<const int32_t*>(data)[i * stride];
     if (dtype == torch::headeronly::ScalarType::Long)
@@ -143,10 +124,7 @@ inline Lengths make_lengths(const std::optional<Tensor>& t, int64_t fallback) {
 // by y: pair (x, y) has index b = y * (y - 1) / 2 + x for x < y, or with the diagonal b = y * (y + 1) / 2 + x for
 // x <= y. Parallelizing over b rather than over rows gives every worker as many pairs: row x owns n - 1 - x of them.
 template <typename F> inline void for_upper_triangle(int64_t start, int64_t end, bool diagonal, const F& f) {
-  // With the diagonal, the pairs (x, y) are the pairs x < y + 1 of the strict triangle, shifted by one.
   const int64_t shift = diagonal ? 1 : 0;
-  // Seek (x, y) for flat index `start` via the triangular-number inverse, corrected with integer steps to absorb
-  // double rounding; then advance incrementally to avoid a sqrt per pair.
   int64_t y = static_cast<int64_t>((1.0 + std::sqrt(1.0 + 8.0 * static_cast<double>(start))) / 2.0);
   while (y > 0 && y * (y - 1) / 2 > start)
     y--;
@@ -162,7 +140,6 @@ template <typename F> inline void for_upper_triangle(int64_t start, int64_t end,
   }
 }
 
-// Checks that the lengths sx and sy of a batch of sizes (n1, n2, s1, s2) do not exceed the padded sizes s1 and s2.
 inline void check_lengths(const Lengths& sx, const Lengths& sy, int64_t n1, int64_t n2, int64_t s1, int64_t s2) {
   for (int64_t x = 0; x < n1; x++) {
     STD_TORCH_CHECK(sx[x] <= s1, "sx values must not exceed distances.size(-2)");
@@ -174,21 +151,17 @@ inline void check_lengths(const Lengths& sx, const Lengths& sy, int64_t n1, int6
 
 // Calls f(x, y, workspace) on the pairs of an n1 x n2 batch in parallel, with a workspace per chunk of pairs: all the
 // pairs, or with `symmetric` the pairs x < y (x <= y with `diagonal`) of the upper triangle, see for_upper_triangle.
-// One pair per grain: the pairs are small, and grouping them measured slower on batches of many small pairs.
 template <typename T, typename F>
 inline void parallel_pairs(int64_t n1, int64_t n2, bool symmetric, bool diagonal, const F& f) {
   const int64_t num_pairs = !symmetric ? n1 * n2 : diagonal ? n1 * (n1 + 1) / 2 : n1 * (n1 - 1) / 2;
   torch::stable::parallel_for(0, num_pairs, 1, [&](int64_t start, int64_t end) {
     std::vector<T> workspace;
     if (symmetric) {
-      // `diagonal` as a constant in each loop: as a run-time value, it measured ~4% slower on 8 x 8 symmetric batches,
-      // through branch mispredictions.
       if (diagonal)
         for_upper_triangle(start, end, true, [&](int64_t x, int64_t y) { f(x, y, workspace); });
       else
         for_upper_triangle(start, end, false, [&](int64_t x, int64_t y) { f(x, y, workspace); });
     } else {
-      // Advance (x, y) incrementally: a division per pair measured ~1% slower on small pairs.
       int64_t x = start / n2;
       int64_t y = start % n2;
       for (int64_t p = start; p < end; p++) {
@@ -202,8 +175,6 @@ inline void parallel_pairs(int64_t n1, int64_t n2, bool symmetric, bool diagonal
   });
 }
 
-// Distances of one pair. The strides are plain values so that fill_grid's inner loop can be specialized for
-// contiguous rows.
 template <typename scalar_t> struct PairDistances {
   const scalar_t* data;
   int64_t stride_i;
@@ -216,6 +187,12 @@ template <typename scalar_t> struct PairDistances {
     return static_cast<acc_t<scalar_t>>(data[i * stride_i + j * stride_j]);
   }
 };
+
+#if defined(_MSC_VER)
+#define TORCHDTW_ALWAYS_INLINE __forceinline
+#else
+#define TORCHDTW_ALWAYS_INLINE inline __attribute__((always_inline))
+#endif
 
 // Row-major DP over an N x M grid, stored in `out` with row stride `ld`. `cell` computes each cell's value:
 // origin() for (0, 0), edge(i, j, parent) on the first row or column where a cell has a single parent,

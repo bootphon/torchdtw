@@ -11,7 +11,7 @@
 #include <torch/headeronly/util/Exception.h>
 #include <type_traits>
 
-// Default shared memory budget of 48KiB per block, available without opting in to a larger carveout.
+// Default shared memory budget of 48KiB per block
 #define MAX_SHARED_BYTES 49152
 
 #ifdef USE_ROCM
@@ -43,7 +43,6 @@ template <typename T, size_t N> inline PackedTensorAccessor64<T, N> packed_acces
   return packed_accessor<T, N, int64_t>(t);
 }
 
-// The current PyTorch stream on the current device, so that kernels are ordered with PyTorch's own work.
 inline cudaStream_t current_stream() {
   torch::stable::accelerator::DeviceIndex device_idx = torch::stable::accelerator::getCurrentDeviceIndex();
   // Available in PyTorch >= 2.13
@@ -53,9 +52,6 @@ inline cudaStream_t current_stream() {
   return static_cast<cudaStream_t>(stream_ptr);
 }
 
-// Threads per block for a wavefront over grids of up to max_x x max_y cells: one per cell of the longest
-// anti-diagonal, rounded up to a whole warp and capped at 1024. Grids with no cell (max_x or max_y is 0) still get a
-// warp: their kernels write the empty pairs, and check their lengths.
 inline int wavefront_threads(int64_t max_x, int64_t max_y, unsigned int num_blocks) {
   const int64_t max_diag = max_x < max_y ? max_x : max_y;
   const int capped_diag = max_diag > 1024 ? 1024 : max_diag < 1 ? 1 : static_cast<int>(max_diag);
@@ -74,7 +70,6 @@ inline int wavefront_threads(int64_t max_x, int64_t max_y, unsigned int num_bloc
   return num_threads;
 }
 
-// Grid of a kernel with one block per pair (x, y) of an (n1, n2) batch.
 inline dim3 pair_grid(int64_t n1, int64_t n2) {
   constexpr int64_t max_grid_x = 2147483647; // 2^31 - 1
   constexpr int64_t max_grid_y = 65535;
@@ -83,23 +78,7 @@ inline dim3 pair_grid(int64_t n1, int64_t n2) {
   return dim3(static_cast<unsigned int>(n1), static_cast<unsigned int>(n2));
 }
 
-// The lengths sx[x] and sy[y] of the pair of a block. Negative lengths are empty. Lengths beyond the padded size,
-// which the CPU backend rejects, trigger a device-side assert, as out-of-range indices do in PyTorch's own CUDA
-// kernels: checking them on the host would need a synchronization, and clamping them silently would hide the error.
-//
-// The kernels never read out of bounds: such pairs are skipped as empty ones, see empty(). This runs as fast as no
-// check at all, through the DP loops that depend on N and M: clamping N and M to the padded sizes instead made hard
-// DTW ~1% slower on small batches. `clamp` must be false. The assert runs when the kernel exits, in the destructor:
-// asserting where the lengths are read made the compiler reserve the registers of the assert's function call over the
-// whole DP loop, +8 registers and ~3% slower.
-// Both lengths are loaded, in their own type, under a single switch on their dtype (sx and sy have the same dtype when
-// both are present), before any conversion: otherwise the conversion of the first waits for its load before the
-// second is issued, measured ~1% slower on small batches.
-// `length_t` is the element type of both sx and sy, when the kernel is specialized for it and both are present: they
-// are then loaded directly. It is void for the generic path, which switches on their dtype at run time.
-template <bool clamp, typename length_t = void> struct PairLengths {
-  static_assert(!clamp, "clamped lengths are not implemented");
-
+template <typename length_t = void> struct PairLengths {
   int32_t N;
   int32_t M;
   bool in_range;
@@ -122,15 +101,12 @@ template <bool clamp, typename length_t = void> struct PairLengths {
     } else {
       const length_t n = static_cast<const length_t*>(sx.data)[x * sx.stride];
       const length_t m = static_cast<const length_t*>(sy.data)[y * sy.stride];
-      // These kernels index the distances in int32, so their padded sizes fit in length_t: compared in it, the
-      // lengths need no widening, which made int32 lengths ~1% slower on small batches.
       in_range = n <= static_cast<length_t>(sx.fallback) && m <= static_cast<length_t>(sy.fallback);
       N = static_cast<int32_t>(n);
       M = static_cast<int32_t>(m);
     }
   }
 
-  // Whether the pair has no cell to compute: a length is not positive, or out of range.
   __device__ __forceinline__ bool empty() const { return N <= 0 || M <= 0 || !in_range; }
 
   __device__ __forceinline__ ~PairLengths() {
@@ -142,8 +118,6 @@ template <bool clamp, typename length_t = void> struct PairLengths {
   PairLengths& operator=(const PairLengths&) = delete;
 };
 
-// Grid of a kernel with one block per pair x < y (x <= y with the diagonal) of an n x n batch, see
-// upper_triangle_pair.
 inline dim3 upper_triangle_grid(int64_t n, bool diagonal) {
   constexpr int64_t max_grid_x = 2147483647; // 2^31 - 1
   const int64_t num_pairs = diagonal ? n * (n + 1) / 2 : n * (n - 1) / 2;
@@ -152,7 +126,6 @@ inline dim3 upper_triangle_grid(int64_t n, bool diagonal) {
   return dim3(static_cast<unsigned int>(num_pairs));
 }
 
-// The pair (x, y) of the b-th block of an upper_triangle_grid, ordered as in for_upper_triangle.
 __device__ __forceinline__ void upper_triangle_pair(int32_t b, bool diagonal, int32_t& x, int32_t& y) {
   y = static_cast<int32_t>((1.0f + sqrtf(1.0f + 8.0f * static_cast<float>(b))) / 2.0f);
   while (static_cast<int64_t>(y) * (y - 1) / 2 > b)
@@ -160,12 +133,10 @@ __device__ __forceinline__ void upper_triangle_pair(int32_t b, bool diagonal, in
   while (static_cast<int64_t>(y + 1) * y / 2 <= b)
     y++;
   x = b - y * (y - 1) / 2;
-  // With the diagonal, the pairs (x, y) are the pairs x < y + 1 of the strict triangle, shifted by one.
   if (diagonal)
     y--;
 }
 
-// Calls f.template operator()<index_t>() with the index type of the distances: int64_t if needs_64bit, else int32_t.
 template <typename F> void dispatch_index(bool needs_64bit, const F& f) {
   if (needs_64bit)
     f.template operator()<int64_t>();
@@ -179,28 +150,19 @@ inline void check_cuda(cudaError_t err, const char* what) {
 
 inline void check_launch(const char* kernel_name) { check_cuda(cudaGetLastError(), kernel_name); }
 
-// Where the blocks of a wavefront kernel keep their three diagonals.
 struct DiagonalStorage {
   size_t smem_size;      // Dynamic shared memory per block, 0 when the diagonals are in global memory.
   size_t scratch_stride; // Global memory per block, 0 when the diagonals are in shared memory.
 };
 
-// Places `bytes` of diagonals per block: in shared memory up to MAX_SHARED_BYTES, in global memory beyond, which
-// leaves the sequence lengths unbounded. Opting in to the device's larger shared memory was measured up to 2x slower
-// than global memory near its limit: it leaves too little L1 cache for the reads of the distances.
 inline DiagonalStorage plan_diagonals(size_t bytes) {
   if (bytes <= MAX_SHARED_BYTES)
     return {bytes, 0};
   return {0, (bytes + 15) & ~static_cast<size_t>(15)};
 }
 
-// Global memory scratch of the diagonals, per launch.
 constexpr int64_t kMaxScratchBytes = int64_t{256} << 20;
 
-// Launches a wavefront kernel over `grid` (with grid.z == 1), calling launch(global, grid, smem_size, scratch, x0):
-// `global` is std::true_type when the diagonals are in global memory, and the launch covers the blocks of rows
-// [x0, x0 + grid.x) of the full grid. In global memory, the rows are split across launches so that their scratch,
-// storage.scratch_stride bytes per block from `scratch`, stays within kMaxScratchBytes.
 template <typename Launch>
 void launch_wavefront(const torch::stable::Tensor& like, const DiagonalStorage& storage, dim3 grid, Launch&& launch) {
   if (storage.scratch_stride == 0) {
@@ -218,7 +180,6 @@ void launch_wavefront(const torch::stable::Tensor& like, const DiagonalStorage& 
   }
 }
 
-// The block's diagonals: dynamic shared memory, or its slice of the global memory scratch.
 template <bool global>
 __device__ __forceinline__ unsigned char* block_diagonals(unsigned char* scratch, size_t scratch_stride) {
   if constexpr (global) {
@@ -229,9 +190,6 @@ __device__ __forceinline__ unsigned char* block_diagonals(unsigned char* scratch
   }
 }
 
-// The pair (x, y) of a block of a wavefront kernel: one block per pair of a pair_grid, or with `symmetric` per pair of
-// an upper_triangle_grid, the launch covering blocks [x0, x0 + gridDim.x) of the first grid dimension (see
-// launch_wavefront).
 __device__ __forceinline__ void block_pair(bool symmetric, bool diagonal, int64_t x0, int32_t& x, int32_t& y) {
   const int32_t row = static_cast<int32_t>(x0) + static_cast<int32_t>(blockIdx.x);
   if (symmetric) {
@@ -242,17 +200,13 @@ __device__ __forceinline__ void block_pair(bool symmetric, bool diagonal, int64_
   }
 }
 
-// Launch configuration of a wavefront kernel with one block per pair, see block_pair, each holding `diagonal_bytes` of
-// diagonals.
 struct WavefrontLaunch {
   dim3 num_blocks;
   int num_threads;
   size_t diagonal_bytes;
-  bool needs_64bit; // Whether indexing the distances needs 64 bits.
+  bool needs_64bit;
 };
 
-// The launch over all the pairs of distances of sizes (n1, n2, s1, s2), or with `symmetric` over the pairs x < y
-// (x <= y with `diagonal`) of its upper triangle.
 inline WavefrontLaunch
 plan_wavefront(torch::headeronly::IntHeaderOnlyArrayRef sizes, bool symmetric, bool diagonal, size_t diagonal_bytes) {
   const int64_t n1 = sizes[0];
@@ -266,14 +220,6 @@ plan_wavefront(torch::headeronly::IntHeaderOnlyArrayRef sizes, bool symmetric, b
           n1 * n2 * s1 * s2 > std::numeric_limits<int32_t>::max()};
 }
 
-// Wavefront DP over the anti-diagonals of an N x M grid, run by a whole block. `cell` owns three diagonal
-// buffers, from block_diagonals, indexed by column: alpha (last diagonal), beta (second to last) and gamma (next).
-// origin() writes the cell (0, 0) into gamma, and update(i, j) writes the cell (i, j) into gamma from its parents:
-// alpha[j - 1] alone if i == 0, alpha[j] alone if j == 0, and otherwise alpha[j] (up), alpha[j - 1] (left) and
-// beta[j - 1] (diag). rotate() then shifts gamma -> alpha -> beta -> gamma. On return, the cell (N - 1, M - 1) is
-// at index M - 1 of alpha.
-// Unlike fill_grid on CPU, the edge cases are left to update(): with separate hooks per case, each one issues its
-// own global and shared memory loads instead of sharing them after the parent selection, which measured ~20% slower.
 template <typename Cell> __device__ __forceinline__ void wavefront(Cell& cell, int32_t N, int32_t M) {
   if (threadIdx.x == 0)
     cell.origin();

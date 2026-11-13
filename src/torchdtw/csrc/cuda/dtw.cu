@@ -33,13 +33,8 @@ PyMODINIT_FUNC TORCHDTW_MODULE_INIT(void) {
 
 namespace torchdtw {
 
-// Each cell tracks its cost and the length of the optimal path reaching it (one more than its chosen
-// parent's path length). The cost of (N-1, M-1) divided by its path length is the final result,
-// so no traceback is needed.
 template <typename acc_t, typename distances_t> struct HardCell {
   distances_t distances;
-  // Named pointers rotated by register swaps: a dynamically indexed pointer array would be
-  // spilled to local memory and slow down every shared memory access in the wavefront loop.
   acc_t* cost_alpha; // Last diagonal
   acc_t* cost_beta;  // Second to last diagonal
   acc_t* cost_gamma; // Buffer for the next diagonal
@@ -55,8 +50,6 @@ template <typename acc_t, typename distances_t> struct HardCell {
   __device__ __forceinline__ void update(int32_t i, int32_t j) {
     acc_t min_cost;
     uint16_t parent_len;
-    // Boundary cells have a single valid parent. No sentinel cost is used for the invalid
-    // parents: a real cost can reach the maximum of narrow integer dtypes and tie with it.
     if (i == 0) {
       min_cost = cost_alpha[j - 1];
       parent_len = len_alpha[j - 1];
@@ -94,8 +87,6 @@ template <typename acc_t, typename distances_t> struct HardCell {
   }
 };
 
-// One block per pair, see block_pair. `length_t` is the element type of sx and sy, or void to read them generically,
-// see PairLengths. `symmetric` is a run-time flag: one kernel for both modes.
 template <typename scalar_t, typename index_t, bool global, typename length_t>
 __global__ void dtw_kernel(
     PackedTensorAccessor32<scalar_t, 2> out, const PackedTensorAccessor<scalar_t, 4, index_t> distances,
@@ -104,7 +95,7 @@ __global__ void dtw_kernel(
   block_pair(symmetric, false, x0, x, y);
   if (x >= out.size(0) || y >= out.size(1))
     return;
-  const PairLengths<false, length_t> lengths(sx, x, sy, y);
+  const PairLengths<length_t> lengths(sx, x, sy, y);
   const int32_t N = lengths.N;
   const int32_t M = lengths.M;
   if (lengths.empty()) {
@@ -116,12 +107,10 @@ __global__ void dtw_kernel(
     return;
   }
 
-  // Accumulate cost in acc_t<scalar_t> (float for half/bfloat16) to limit rounding drift.
   using acc_t = torchdtw::acc_t<scalar_t>;
   unsigned char* const smem = block_diagonals<global>(scratch, scratch_stride);
   const int32_t buf_len = static_cast<int32_t>(distances.size(3));
   acc_t* const cost_smem = reinterpret_cast<acc_t*>(smem);
-  // Round the cost buffers' size up to 2 bytes so the uint16_t buffers are aligned for 1-byte dtypes.
   const size_t len_offset = (3 * static_cast<size_t>(buf_len) * sizeof(acc_t) + 1) & ~static_cast<size_t>(1);
   uint16_t* const len_smem = reinterpret_cast<uint16_t*>(smem + len_offset);
   const auto distances_xy = distances[x][y];
@@ -149,10 +138,6 @@ void dtw_batch_cuda_impl(
   const torch::stable::accelerator::DeviceGuard device_guard(distances.get_device());
   const DiagonalStorage storage = plan_diagonals(launch.diagonal_bytes);
   const cudaStream_t stream = current_stream();
-  // Lengths given as int32 or int64, the usual dtypes, are loaded directly by a kernel specialized for them: the
-  // generic run-time switch on their dtype measured ~2.5% slower on small and medium batches, where the kernel's
-  // prologue weighs. Only the shared memory, 32-bit index kernels are specialized: beyond, sequences or batches are
-  // large enough for the prologue not to matter.
   const bool typed = sx.data != nullptr && sy.data != nullptr && !launch.needs_64bit;
   const bool int32_lengths = typed && sx.dtype == torch::headeronly::ScalarType::Int;
   const bool int64_lengths = typed && sx.dtype == torch::headeronly::ScalarType::Long;
@@ -190,7 +175,6 @@ void dtw_batch_cuda_impl(
       });
 }
 
-// dtw_batch, with the lengths sx and sy, nullptr when absent.
 static Tensor dtw_batch_cuda(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric) {
   return dtw_batch_op(
       distances,
@@ -206,13 +190,8 @@ static Tensor dtw_batch_cuda(const Tensor& distances, const Tensor* sx, const Te
         STD_TORCH_CHECK(
             s1 + s2 - 1 <= std::numeric_limits<uint16_t>::max(),
             "Sum of sequence lengths exceeds uint16_t path-length capacity");
-        // No block to launch: a grid of 0 blocks is not a valid launch, and there are no lengths to check. With s1 or
-        // s2 equal to 0, the kernel still runs, to write the empty pairs and check their lengths, as the CPU does.
         if (n1 == 0 || n2 == 0 || (symmetric && n1 == 1))
           return;
-        // The diagonals are 3 cost buffers and 3 path-length buffers, each of length s2. They fit MAX_SHARED_BYTES up
-        // to 49152 / (3 * (sizeof(acc_t) + sizeof(uint16_t))) = 1638 for double, 2730 for float/half/bfloat16 (whose
-        // costs accumulate in float): beyond, see plan_diagonals.
         using acc_t = torchdtw::acc_t<distances_t>;
         const size_t cost_bytes = (3 * static_cast<size_t>(s2) * sizeof(acc_t) + 1) & ~static_cast<size_t>(1);
         const size_t diagonal_bytes = cost_bytes + 3 * static_cast<size_t>(s2) * sizeof(uint16_t);
@@ -221,7 +200,6 @@ static Tensor dtw_batch_cuda(const Tensor& distances, const Tensor* sx, const Te
       });
 }
 
-// The default overload of dtw_batch, with both lengths, see dtw_batch_lengths_cpu.
 Tensor dtw_batch_lengths_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
   return dtw_batch_cuda(distances, &sx, &sy, symmetric);
 }

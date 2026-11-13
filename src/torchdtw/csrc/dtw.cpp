@@ -7,13 +7,7 @@
 #include <torch/headeronly/util/Exception.h>
 #include <vector>
 
-/* Creates a dummy empty _C module that can be imported from Python.
-   The import from Python will load the .so consisting of this file
-   in this extension, so that the STABLE_TORCH_LIBRARY static initializers
-   below are run.
-   PyMODINIT_FUNC (rather than a bare extern "C") is required: it carries the
-   __declspec(dllexport) that makes the symbol visible on Windows, where
-   PyTorch's BuildExtension suppresses setuptools' automatic /EXPORT:PyInit__C. */
+// Creates a dummy empty _C module that can be imported from Python.
 PyMODINIT_FUNC PyInit__C(void) {
   static struct PyModuleDef module_def = {
       PyModuleDef_HEAD_INIT,
@@ -28,8 +22,6 @@ PyMODINIT_FUNC PyInit__C(void) {
 
 namespace torchdtw {
 
-// Accumulated DTW cost of each cell: its distance plus the minimum cost among its parents. The inner cell is
-// branchless.
 template <typename scalar_t> struct HardCell {
   using acc = acc_t<scalar_t>;
   PairDistances<scalar_t> distances;
@@ -47,8 +39,6 @@ compute_dtw_cost(const TensorAccessor<const scalar_t, 2>& distances_a, int64_t N
   fill_grid(HardCell<scalar_t>{PairDistances<scalar_t>(distances_a)}, N, M, cost, M);
 }
 
-// Walks the DTW path back from (N - 1, M - 1) to (0, 0) through the accumulated costs, calling visit(i, j) on
-// each of its cells. Ties prefer the diagonal, then the left parent.
 template <typename cost_t, typename Visit>
 static void trace_dtw_path(const cost_t* cost, int64_t N, int64_t M, Visit&& visit) {
   int64_t i = N - 1;
@@ -96,7 +86,6 @@ Tensor dtw_cpu(const Tensor& distances) {
   STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
   Tensor out = torch::stable::new_empty(distances, torch::headeronly::IntHeaderOnlyArrayRef());
   dispatch_dtw(distances.scalar_type(), [&]<typename scalar_t>() {
-    // Reuse scratch across calls on this thread to avoid malloc/free churn for many small DTWs.
     thread_local std::vector<acc_t<scalar_t>> workspace;
     const scalar_t result = compute_dtw_value<scalar_t>(accessor<const scalar_t, 2>(distances), N, M, workspace);
     torch::stable::fill_(out, result);
@@ -144,7 +133,6 @@ void dtw_batch_cpu_impl(
   });
 }
 
-// dtw_batch, with the lengths sx and sy, nullptr when absent.
 static Tensor dtw_batch_cpu(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric) {
   return dtw_batch_op(
       distances,
@@ -157,8 +145,6 @@ static Tensor dtw_batch_cpu(const Tensor& distances, const Tensor* sx, const Ten
       });
 }
 
-// The default overload of dtw_batch, with both lengths. Missing lengths go through the optional_lengths overload:
-// Tensor? arguments measured ~0.15 µs more per call than Tensor ones, ~2% of a small batch on CUDA.
 Tensor dtw_batch_lengths_cpu(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric) {
   return dtw_batch_cpu(distances, &sx, &sy, symmetric);
 }
