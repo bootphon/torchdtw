@@ -16,7 +16,7 @@ no plan to add variants.
 <!-- griffe -->
 ## Usage
 
-This package provides three functions:
+This package provides:
 
 ### `dtw`
 
