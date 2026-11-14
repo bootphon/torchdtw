@@ -24,22 +24,30 @@ This package provides:
 ### `dtw`
 
 ```python
-dtw(distances, *, normalize=True)
+dtw(distances, sx=None, sy=None, *, normalize=True)
 ```
 
-Compute the DTW cost of the given ``distances`` 2D tensor.
+Compute the DTW cost of a pair of sequences, or of each pair in a batch of independent pairs.
 
-Use ``+inf`` to mask forbidden alignments. NaN distances are unsupported: the result is
+With 3D ``distances``, only the ``(sx[b], sy[b])`` sub-block of each pair is read.
+For B independent pairs, prefer this to ``dtw_batch`` + ``.diagonal()``, which computes all B^2 pairs, or to a
+loop of 2D calls. Use ``+inf`` to mask forbidden alignments. NaN distances are unsupported: the result is
 unspecified and may differ between the CPU and CUDA backends.
 
 **Parameters:**
 
-- **distances** (<code>Tensor</code>) – A 2D tensor of shape (n, m) with the pairwise distances between two sequences.
+- **distances** (<code>Tensor</code>) – A 2D tensor of shape (N, M) with the pairwise distances between the frames of two sequences,
+or a 3D tensor of shape (B, N, M) for B independent pairs.
+- **sx** (<code>Tensor | None</code>) – An optional 1D integer tensor of shape (B,) with the lengths of the first sequences, at most N.
+Defaults to N. Only with 3D ``distances``.
+- **sy** (<code>Tensor | None</code>) – An optional 1D integer tensor of shape (B,) with the lengths of the second sequences, at most M.
+Defaults to M. Only with 3D ``distances``.
 - **normalize** (<code>bool</code>) – Whether to divide the cost by the length of the warping path.
 
 **Returns:**
 
-- <code>Tensor</code> – A scalar tensor with the cost.
+- <code>Tensor</code> – A scalar tensor with the cost for 2D ``distances``, a 1D tensor of shape (B,) with the costs for 3D
+ones.
 
 ### `dtw_batch`
 
@@ -199,6 +207,9 @@ error checks as the CUDA backend.
 For many DTWs on short sequences, prefer `dtw_batch` over a Python loop of `dtw` calls.
 A single `dtw_batch` launches one CUDA kernel (one block per pair) or one parallel CPU
 loop, amortizing dispatch, allocation, and launch overhead across the whole batch.
+For B independent pairs, prefer `dtw` on 3D `distances` of shape (B, N, M), with `sx` and
+`sy`, to `dtw_batch` followed by `.diagonal()`, which computes all B^2 pairs and needs B
+times the distances memory, or to a loop of 2D `dtw` calls.
 
 On CUDA, each pair is computed by one block, which keeps three anti-diagonals of the
 dynamic program in shared memory when they fit: when `distances.size(-1)` is at most 2730

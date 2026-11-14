@@ -179,15 +179,20 @@ void dtw_batch_cuda_impl(
       });
 }
 
-static Tensor
-dtw_batch_cuda(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric, bool normalize) {
+static Tensor dtw_batch_cuda(
+    const Tensor& distances, const Tensor* sx, const Tensor* sy, bool paired, bool symmetric, bool normalize) {
   return dtw_batch_op(
       distances,
       sx,
       sy,
+      paired,
       symmetric,
       [&]<typename distances_t>(
-          Tensor& out, torch::headeronly::IntHeaderOnlyArrayRef sizes, const Lengths& sx_l, const Lengths& sy_l) {
+          Tensor& out,
+          const Tensor& pairs,
+          torch::headeronly::IntHeaderOnlyArrayRef sizes,
+          const Lengths& sx_l,
+          const Lengths& sy_l) {
         const int64_t n1 = sizes[0];
         const int64_t n2 = sizes[1];
         const int64_t s1 = sizes[2];
@@ -202,24 +207,33 @@ dtw_batch_cuda(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool
         const size_t diagonal_bytes = cost_bytes + 3 * static_cast<size_t>(s2) * sizeof(uint16_t);
         dtw_batch_cuda_impl<distances_t>(
             out,
-            distances,
+            pairs,
             sx_l,
             sy_l,
             symmetric,
             normalize,
-            plan_wavefront(distances, sizes, symmetric, false, diagonal_bytes));
+            plan_wavefront(pairs, sizes, symmetric, false, diagonal_bytes));
       });
 }
 
 Tensor
 dtw_batch_lengths_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool symmetric, bool normalize) {
-  return dtw_batch_cuda(distances, &sx, &sy, symmetric, normalize);
+  return dtw_batch_cuda(distances, &sx, &sy, false, symmetric, normalize);
 }
 
 Tensor dtw_batch_optional_lengths_cuda(
     const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, bool symmetric,
     bool normalize) {
-  return dtw_batch_cuda(distances, optional_ptr(sx), optional_ptr(sy), symmetric, normalize);
+  return dtw_batch_cuda(distances, optional_ptr(sx), optional_ptr(sy), false, symmetric, normalize);
+}
+
+Tensor dtw_lengths_cuda(const Tensor& distances, const Tensor& sx, const Tensor& sy, bool normalize) {
+  return dtw_batch_cuda(distances, &sx, &sy, true, false, normalize);
+}
+
+Tensor dtw_optional_lengths_cuda(
+    const Tensor& distances, const std::optional<Tensor>& sx, const std::optional<Tensor>& sy, bool normalize) {
+  return dtw_batch_cuda(distances, optional_ptr(sx), optional_ptr(sy), true, false, normalize);
 }
 
 Tensor dtw_cuda(const Tensor& distances, bool normalize) {
@@ -227,12 +241,14 @@ Tensor dtw_cuda(const Tensor& distances, bool normalize) {
   const int64_t N = distances.size(0);
   const int64_t M = distances.size(1);
   const Tensor result =
-      dtw_batch_cuda(torch::stable::view(distances, {1, 1, N, M}), nullptr, nullptr, false, normalize);
+      dtw_batch_cuda(torch::stable::view(distances, {1, 1, N, M}), nullptr, nullptr, false, false, normalize);
   return torch::stable::view(result, torch::headeronly::IntHeaderOnlyArrayRef());
 }
 
 STABLE_TORCH_LIBRARY_IMPL(torchdtw, CUDA, m) {
   m.impl("dtw", &TORCH_BOX(dtw_cuda));
+  m.impl("dtw.lengths", &TORCH_BOX(dtw_lengths_cuda));
+  m.impl("dtw.optional_lengths", &TORCH_BOX(dtw_optional_lengths_cuda));
   m.impl("dtw_batch", &TORCH_BOX(dtw_batch_lengths_cuda));
   m.impl("dtw_batch.optional_lengths", &TORCH_BOX(dtw_batch_optional_lengths_cuda));
 }

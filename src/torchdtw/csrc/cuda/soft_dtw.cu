@@ -129,14 +129,14 @@ template <typename F> void dispatch_bool(bool value, const F& f) {
 template <typename scalar_t, typename index_t, bool global, bool symmetric>
 __global__ void soft_dtw_kernel(
     PackedTensorAccessor<scalar_t, 2, index_t> out, acc_t<scalar_t>* R,
-    const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths sx, const Lengths sy, bool paired,
+    const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths sx, const Lengths sy,
     acc_t<scalar_t> gamma, int64_t bandwidth, bool normalize, unsigned char* scratch, size_t scratch_stride, int64_t x0,
     int64_t y0) {
   using acc_t = torchdtw::acc_t<scalar_t>;
   int32_t x, y;
   block_pair(symmetric, true, x0, y0, x, y);
   const bool mirror = symmetric && x != y;
-  const PairLengths<> lengths(sx, x, sy, paired ? x : y);
+  const PairLengths<> lengths(sx, x, sy, y);
   const int32_t N = lengths.N;
   const int32_t M = lengths.M;
   const index_t s1 = distances.size(2);
@@ -185,13 +185,13 @@ __global__ void soft_dtw_kernel(
 template <typename scalar_t, typename index_t, bool global, bool symmetric>
 __global__ void soft_dtw_backward_kernel(
     scalar_t* grad_distances, const PackedTensorAccessor<scalar_t, 2, index_t> grad, const acc_t<scalar_t>* R,
-    const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths sx, const Lengths sy, bool paired,
+    const PackedTensorAccessor<scalar_t, 4, index_t> distances, const Lengths sx, const Lengths sy,
     acc_t<scalar_t> inv_gamma, bool normalize, unsigned char* scratch, size_t scratch_stride, int64_t x0, int64_t y0) {
   using acc_t = torchdtw::acc_t<scalar_t>;
   int32_t x, y;
   block_pair(symmetric, true, x0, y0, x, y);
   const bool mirror = symmetric && x != y;
-  const PairLengths<> lengths(sx, x, sy, paired ? x : y);
+  const PairLengths<> lengths(sx, x, sy, y);
   const int32_t N = lengths.N;
   const int32_t M = lengths.M;
   const index_t s1 = distances.size(2);
@@ -234,7 +234,7 @@ void soft_dtw_cuda_impl(
   using acc_t = torchdtw::acc_t<distances_t>;
   const WavefrontLaunch launch = soft_dtw_launch<acc_t>(pairs, symmetric);
   const Lengths sx_l = make_lengths(sx, pairs.size(2));
-  const Lengths sy_l = make_lengths(sy, pairs.size(3));
+  const Lengths sy_l = make_lengths(sy, pairs.size(3), paired);
   acc_t* const R_data = keep_R ? reinterpret_cast<acc_t*>(R.data_ptr()) : nullptr;
   const DiagonalStorage storage = plan_diagonals(launch.diagonal_bytes);
   const cudaStream_t stream = current_stream();
@@ -252,7 +252,6 @@ void soft_dtw_cuda_impl(
                 packed_accessor<distances_t, 4, index_t>(pairs),
                 sx_l,
                 sy_l,
-                paired,
                 static_cast<acc_t>(gamma),
                 bandwidth,
                 normalize,
@@ -273,7 +272,7 @@ void soft_dtw_backward_cuda_impl(
   using acc_t = torchdtw::acc_t<distances_t>;
   const WavefrontLaunch launch = soft_dtw_launch<acc_t>(pairs, symmetric);
   const Lengths sx_l = make_lengths(sx, pairs.size(2));
-  const Lengths sy_l = make_lengths(sy, pairs.size(3));
+  const Lengths sy_l = make_lengths(sy, pairs.size(3), paired);
   distances_t* const out = reinterpret_cast<distances_t*>(grad_distances.data_ptr());
   const acc_t* const R_data = reinterpret_cast<const acc_t*>(R.data_ptr());
   const acc_t inv_gamma = static_cast<acc_t>(1) / static_cast<acc_t>(gamma);
@@ -295,7 +294,6 @@ void soft_dtw_backward_cuda_impl(
                     packed_accessor<distances_t, 4, index_t>(pairs),
                     sx_l,
                     sy_l,
-                    paired,
                     inv_gamma,
                     normalize,
                     scratch,

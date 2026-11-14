@@ -24,12 +24,13 @@ def _batch(n: int = 2, m: int = 2, x: int = 3, y: int = 3) -> tuple[torch.Tensor
     return d, sx, sy
 
 
-@pytest.mark.parametrize(("op", "ndim"), [(dtw, 2), (dtw_path, 2), (dtw_batch, 4)])
-def test_dtw_rank_error(op, ndim: int) -> None:
+@pytest.mark.parametrize(("op", "ndims"), [(dtw, (2, 3)), (dtw_path, (2,)), (dtw_batch, (4,))])
+def test_dtw_rank_error(op, ndims: tuple[int, ...]) -> None:
     """Dtw / dtw_path / dtw_batch reject distances of the wrong rank in Python, with the RankError of soft-DTW."""
-    for shape in [(3,), (2, 3, 4), (1, 1, 2, 2, 2)]:
-        if len(shape) != ndim:
-            with pytest.raises(RankError, match=f"must be a {ndim}D tensor, got {len(shape)}D"):
+    expected = " or ".join(f"{ndim}D" for ndim in ndims)
+    for shape in [(3,), (2, 3, 4), (1, 1, 2, 2), (1, 1, 2, 2, 2)]:
+        if len(shape) not in ndims:
+            with pytest.raises(RankError, match=f"must be a {expected} tensor, got {len(shape)}D"):
                 op(torch.rand(shape))
 
 

@@ -80,7 +80,7 @@ void soft_dtw_cpu_impl(
   const int64_t s1 = pairs.size(2);
   const int64_t s2 = pairs.size(3);
   const Lengths sx = make_lengths(sx_opt, s1);
-  const Lengths sy = make_lengths(sy_opt, s2);
+  const Lengths sy = make_lengths(sy_opt, s2, paired);
   check_lengths(sx, sy, pairs.size(0), paired ? pairs.size(0) : n2, s1, s2);
   const auto distances_a = accessor<const distances_t, 4>(pairs);
   auto out_a = accessor<distances_t, 2>(out);
@@ -91,7 +91,7 @@ void soft_dtw_cpu_impl(
   parallel_pairs<acc>(pairs.size(0), n2, symmetric, true, [&](int64_t x, int64_t y, std::vector<acc>& workspace) {
     const bool mirror = symmetric && x != y;
     const int64_t N = std::max<int64_t>(sx[x], 0);
-    const int64_t M = std::max<int64_t>(sy[paired ? x : y], 0);
+    const int64_t M = std::max<int64_t>(sy[sy.pair_index(x, y)], 0);
     if (R_data != nullptr) {
       fill_padding(R_data + (x * n2 + y) * s1 * s2, s1, s2, N, M, infinity<acc>());
       if (mirror)
@@ -132,7 +132,7 @@ void soft_dtw_backward_cpu_impl(
   const int64_t s1 = pairs.size(2);
   const int64_t s2 = pairs.size(3);
   const Lengths sx = make_lengths(sx_opt, s1);
-  const Lengths sy = make_lengths(sy_opt, s2);
+  const Lengths sy = make_lengths(sy_opt, s2, paired);
   check_lengths(sx, sy, pairs.size(0), paired ? pairs.size(0) : n2, s1, s2);
   const auto distances_a = accessor<const distances_t, 4>(pairs);
   const auto grad_a = accessor<const distances_t, 2>(grad);
@@ -143,7 +143,7 @@ void soft_dtw_backward_cpu_impl(
   parallel_pairs<acc>(pairs.size(0), n2, symmetric, true, [&](int64_t x, int64_t y, std::vector<acc>& log_e) {
     const bool mirror = symmetric && x != y;
     const int64_t N = std::max<int64_t>(sx[x], 0);
-    const int64_t M = std::max<int64_t>(sy[paired ? x : y], 0);
+    const int64_t M = std::max<int64_t>(sy[sy.pair_index(x, y)], 0);
     distances_t* const out_xy = out + (x * n2 + y) * s1 * s2;
     fill_padding(out_xy, s1, s2, N, M, static_cast<distances_t>(0));
     if (mirror)

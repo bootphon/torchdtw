@@ -29,13 +29,24 @@ TORCHDTW_HOST_DEVICE inline scalar_t normalized_cost(acc cost, int64_t path_len)
 }
 
 template <typename Run>
-Tensor dtw_batch_op(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool symmetric, const Run& run) {
-  const torch::headeronly::IntHeaderOnlyArrayRef sizes = check_dtw_batch_inputs(distances, sx, sy, symmetric);
+Tensor
+dtw_batch_op(const Tensor& distances, const Tensor* sx, const Tensor* sy, bool paired, bool symmetric, const Run& run) {
+  if (paired) {
+    STD_TORCH_CHECK(distances.dim() == 3, "distances must be a 3D tensor");
+    check_lengths_tensors(distances, sx, sy, distances.size(0), distances.size(0));
+  } else {
+    check_dtw_batch_inputs(distances, sx, sy, symmetric);
+  }
+  const Tensor pairs = paired ? as_all_pairs(distances) : distances;
+  const torch::headeronly::IntHeaderOnlyArrayRef sizes = pairs.sizes();
   Tensor out = symmetric ? torch::stable::new_zeros(distances, {sizes[0], sizes[1]})
                          : torch::stable::new_empty(distances, {sizes[0], sizes[1]});
   dispatch_dtw(distances.scalar_type(), [&]<typename distances_t>() {
-    run.template operator()<distances_t>(out, sizes, make_lengths(sx, sizes[2]), make_lengths(sy, sizes[3]));
+    run.template operator()<distances_t>(
+        out, pairs, sizes, make_lengths(sx, sizes[2]), make_lengths(sy, sizes[3], paired));
   });
+  if (paired)
+    out = torch::stable::view(out, {sizes[0]});
   return out;
 }
 

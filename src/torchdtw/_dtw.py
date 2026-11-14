@@ -2,27 +2,48 @@
 
 import torch
 
-from ._errors import RankError, check_no_cuda_on_windows
+from ._errors import RankError, SinglePairLengthsError, check_no_cuda_on_windows
 
 __all__ = ["dtw", "dtw_batch", "dtw_path"]
 
 
-def dtw(distances: torch.Tensor, *, normalize: bool = True) -> torch.Tensor:
-    """Compute the DTW cost of the given ``distances`` 2D tensor.
+def dtw(
+    distances: torch.Tensor,
+    sx: torch.Tensor | None = None,
+    sy: torch.Tensor | None = None,
+    *,
+    normalize: bool = True,
+) -> torch.Tensor:
+    """Compute the DTW cost of a pair of sequences, or of each pair in a batch of independent pairs.
 
-    Use ``+inf`` to mask forbidden alignments. NaN distances are unsupported: the result is
+    With 3D ``distances``, only the ``(sx[b], sy[b])`` sub-block of each pair is read.
+    For B independent pairs, prefer this to ``dtw_batch`` + ``.diagonal()``, which computes all B^2 pairs, or to a
+    loop of 2D calls. Use ``+inf`` to mask forbidden alignments. NaN distances are unsupported: the result is
     unspecified and may differ between the CPU and CUDA backends.
 
-    :param distances: A 2D tensor of shape (n, m) with the pairwise distances between two sequences.
+    :param distances: A 2D tensor of shape (N, M) with the pairwise distances between the frames of two sequences,
+        or a 3D tensor of shape (B, N, M) for B independent pairs.
+    :param sx: An optional 1D integer tensor of shape (B,) with the lengths of the first sequences, at most N.
+        Defaults to N. Only with 3D ``distances``.
+    :param sy: An optional 1D integer tensor of shape (B,) with the lengths of the second sequences, at most M.
+        Defaults to M. Only with 3D ``distances``.
     :param normalize: Whether to divide the cost by the length of the warping path.
-    :returns: A scalar tensor with the cost.
+    :returns: A scalar tensor with the cost for 2D ``distances``, a 1D tensor of shape (B,) with the costs for 3D
+        ones.
     """
-    if distances.ndim != 2:
-        raise RankError("2D", distances.ndim)
+    ndim = distances.ndim
+    if ndim == 2 and (sx is not None or sy is not None):
+        raise SinglePairLengthsError
+    if ndim not in {2, 3}:
+        raise RankError("2D or 3D", ndim)
     check_no_cuda_on_windows(distances)
     if distances.requires_grad:
         distances = distances.detach()
-    return torch.ops.torchdtw.dtw.default(distances, normalize)
+    if ndim == 2:
+        return torch.ops.torchdtw.dtw.default(distances, normalize)
+    if sx is not None and sy is not None:
+        return torch.ops.torchdtw.dtw.lengths(distances, sx, sy, normalize)
+    return torch.ops.torchdtw.dtw.optional_lengths(distances, sx, sy, normalize)
 
 
 def dtw_path(distances: torch.Tensor) -> torch.Tensor:
@@ -120,6 +141,18 @@ def _(distances: torch.Tensor, normalize: bool = True) -> torch.Tensor:
     torch._check(distances.ndim == 2, lambda: "distances must be a 2D tensor")
     torch._check(distances.dtype in _DISTANCES_DTYPES, lambda: f"dtw not implemented for {distances.dtype}")
     return torch.empty((), dtype=distances.dtype, layout=distances.layout, device=distances.device)
+
+
+@torch.library.register_fake("torchdtw::dtw.lengths")
+@torch.library.register_fake("torchdtw::dtw.optional_lengths")
+def _(
+    distances: torch.Tensor, sx: torch.Tensor | None, sy: torch.Tensor | None, normalize: bool = True
+) -> torch.Tensor:
+    """Register the FakeTensor kernel for 3D dtw, for compatibility with torch.compile."""
+    torch._check(distances.ndim == 3, lambda: "distances must be a 3D tensor")
+    torch._check(distances.dtype in _DISTANCES_DTYPES, lambda: f"dtw not implemented for {distances.dtype}")
+    check_lengths_tensors(distances, sx, sy, distances.shape[0], distances.shape[0])
+    return torch.empty((distances.shape[0],), dtype=distances.dtype, layout=distances.layout, device=distances.device)
 
 
 @torch.library.register_fake("torchdtw::dtw_path")

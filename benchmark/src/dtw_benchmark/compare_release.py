@@ -1,5 +1,6 @@
 """Compare torchdtw's ``dtw`` and ``dtw_batch`` between two builds: correctness, then speed.
 
+Also 3D ``dtw``, on the paired cases of soft-DTW, on a side that has it.
 Also ``soft_dtw`` and ``soft_dtw_batch``, forward and forward + backward, when both builds have them.
 
 Driven by the ``compare`` subcommand of ``python -m dtw_benchmark`` (the CLI lives in ``__main__``). Each side, the
@@ -129,9 +130,33 @@ def measure_all(
                             f"{cases.batch_label(config, spread)} {str(dtype).removeprefix('torch.')}{threads}",
                             num_threads,
                         )
+        if "lengths" in torch.ops.torchdtw.dtw.overloads():  # 3D dtw: probe the overload, as dtw itself exists
+            measure_paired(torchdtw, measure, device, thread_counts, seed)
         if hasattr(torchdtw, "soft_dtw"):
             measure_soft(torchdtw, measure, device, thread_counts, seed)
     return outputs, timings
+
+
+def measure_paired(
+    torchdtw: types.ModuleType,
+    measure: Callable[..., None],
+    device: torch.device,
+    thread_counts: list[int],
+    seed: int,
+) -> None:
+    """Measure 3D ``dtw`` on the paired cases of soft-DTW, with int32 lengths."""
+    for config in soft_cases.CONFIGS:
+        for spread in cases.SPREADS:
+            d, sx, sy = soft_cases.paired_inputs(config, spread, device=device, seed=seed)
+            for num_threads in thread_counts:
+                threads = f" t={num_threads}" if device.type == "cpu" else ""
+                measure(
+                    lambda d=d, sx=sx, sy=sy: torchdtw.dtw(d, sx, sy),
+                    device,
+                    f"dtw 3D / {device.type}",
+                    f"{soft_cases.config_label(config, spread)}{threads}",
+                    num_threads,
+                )
 
 
 def measure_soft(

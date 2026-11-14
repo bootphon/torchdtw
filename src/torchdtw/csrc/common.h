@@ -76,6 +76,12 @@ TORCHDTW_HOST_DEVICE inline int64_t visit_lengths_dtype(torch::headeronly::Scala
 
 inline const Tensor* optional_ptr(const std::optional<Tensor>& t) { return t.has_value() ? &t.value() : nullptr; }
 
+inline Tensor as_all_pairs(const Tensor& distances) {
+  if (distances.dim() == 4)
+    return distances;
+  return torch::stable::view(distances, {distances.size(0), 1, distances.size(1), distances.size(2)});
+}
+
 inline void check_lengths_tensors(const Tensor& distances, const Tensor* sx, const Tensor* sy, int64_t nx, int64_t ny) {
   const int32_t device = distances.get_device();
   const int64_t sizes[2] = {nx, ny};
@@ -100,6 +106,9 @@ struct Lengths {
   int64_t stride;
   int64_t fallback;
   torch::headeronly::ScalarType dtype;
+  bool paired;
+
+  TORCHDTW_HOST_DEVICE int64_t pair_index(int64_t x, int64_t y) const { return paired ? x : y; }
 
   TORCHDTW_HOST_DEVICE int64_t operator[](int64_t i) const {
     if (data == nullptr)
@@ -113,14 +122,14 @@ struct Lengths {
   }
 };
 
-inline Lengths make_lengths(const Tensor* t, int64_t fallback) {
+inline Lengths make_lengths(const Tensor* t, int64_t fallback, bool paired = false) {
   if (t == nullptr)
-    return {nullptr, 0, fallback, torch::headeronly::ScalarType::Long};
-  return {t->data_ptr(), t->strides()[0], fallback, t->scalar_type()};
+    return {nullptr, 0, fallback, torch::headeronly::ScalarType::Long, paired};
+  return {t->data_ptr(), t->strides()[0], fallback, t->scalar_type(), paired};
 }
 
-inline Lengths make_lengths(const std::optional<Tensor>& t, int64_t fallback) {
-  return make_lengths(optional_ptr(t), fallback);
+inline Lengths make_lengths(const std::optional<Tensor>& t, int64_t fallback, bool paired = false) {
+  return make_lengths(optional_ptr(t), fallback, paired);
 }
 
 // Calls f(x, y) on the pairs of flat indices [start, end) of the upper triangle of an n x n grid of pairs, ordered

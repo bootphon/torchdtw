@@ -79,12 +79,6 @@ template <typename T> TORCHDTW_HOST_DEVICE inline T backward_term(T log_e_s, T r
   return log_e_s + (r_s - d_s - r) * inv_gamma;
 }
 
-inline Tensor as_all_pairs(const Tensor& distances) {
-  if (distances.dim() == 4)
-    return distances;
-  return torch::stable::view(distances, {distances.size(0), 1, distances.size(1), distances.size(2)});
-}
-
 inline torch::headeronly::ScalarType acc_scalar_type(torch::headeronly::ScalarType dtype) {
   using torch::headeronly::ScalarType;
   return dtype == ScalarType::Half || dtype == ScalarType::BFloat16 ? ScalarType::Float : dtype;

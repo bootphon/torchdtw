@@ -86,7 +86,8 @@ template <typename length_t = void> struct PairLengths {
   int32_t M;
   bool in_range;
 
-  __device__ __forceinline__ PairLengths(const Lengths& sx, int64_t x, const Lengths& sy, int64_t y) {
+  __device__ __forceinline__ PairLengths(const Lengths& sx, int64_t x, const Lengths& sy, int64_t y_) {
+    const int64_t y = sy.pair_index(x, y_);
     if constexpr (std::is_void_v<length_t>) {
       int64_t m;
       const int64_t n = visit_lengths_dtype(sx.data != nullptr ? sx.dtype : sy.dtype, [&](auto t) {
