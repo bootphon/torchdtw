@@ -106,10 +106,23 @@ Tensor dtw_cpu(const Tensor& distances, bool normalize) {
       const auto distances_a = accessor<const scalar_t, 2>(distances);
       const scalar_t result = normalize ? compute_dtw_value<scalar_t, acc, true>(distances_a, N, M, workspace)
                                         : compute_dtw_value<scalar_t, acc, false>(distances_a, N, M, workspace);
-      torch::stable::fill_(out, result);
+      *reinterpret_cast<scalar_t*>(out.data_ptr()) = result;
     });
   });
   return out;
+}
+
+template <typename cost_t> static int64_t write_dtw_path(const cost_t* cost, int64_t N, int64_t M, int64_t* path) {
+  int64_t start = N + M - 1;
+  trace_dtw_path(cost, N, M, [&](int64_t i, int64_t j) {
+    start--;
+    path[2 * start] = i;
+    path[2 * start + 1] = j;
+  });
+  const int64_t length = N + M - 1 - start;
+  for (int64_t k = 0; k < 2 * length; k++)
+    path[k] = path[2 * start + k];
+  return length;
 }
 
 Tensor dtw_path_cpu(const Tensor& distances) {
@@ -117,22 +130,16 @@ Tensor dtw_path_cpu(const Tensor& distances) {
   const int64_t N = distances.size(0);
   const int64_t M = distances.size(1);
   STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
-  std::vector<std::pair<int64_t, int64_t>> path;
+  Tensor out = torch::stable::new_empty(distances, {N + M - 1, 2}, torch::headeronly::ScalarType::Long);
+  int64_t length = 0;
   dispatch_dtw(distances.scalar_type(), [&]<typename scalar_t>() {
     dispatch_acc<scalar_t>(N + M - 1, [&]<typename acc>() {
       std::vector<acc> cost(N * M);
       compute_dtw_cost<scalar_t, acc>(accessor<const scalar_t, 2>(distances), N, M, cost.data());
-      path.reserve(N + M - 1);
-      trace_dtw_path(cost.data(), N, M, [&](int64_t i, int64_t j) { path.push_back({i, j}); });
+      length = write_dtw_path(cost.data(), N, M, reinterpret_cast<int64_t*>(out.data_ptr()));
     });
   });
-  std::reverse(path.begin(), path.end());
-  Tensor out = torch::stable::new_empty(distances, {(int64_t)path.size(), 2}, torch::headeronly::ScalarType::Long);
-  std::memcpy(
-      reinterpret_cast<int64_t*>(out.data_ptr()),
-      reinterpret_cast<const int64_t*>(path.data()),
-      static_cast<size_t>(path.size() * 2) * sizeof(int64_t));
-  return out;
+  return torch::stable::narrow(out, 0, 0, length);
 }
 
 template <typename distances_t, typename acc, bool normalize>

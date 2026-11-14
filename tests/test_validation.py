@@ -102,6 +102,17 @@ def test_dtw_batch_length_dtype_mismatch() -> None:
         dtw_batch(d, sx, sy, symmetric=False)
 
 
+@pytest.mark.parametrize("value", [2**63, 2**63 + 5, 2**64 - 1])
+def test_dtw_batch_uint64_length_beyond_int64(value: int) -> None:
+    """uint64 lengths >= 2^63, negative as int64, are rejected rather than read as empty pairs."""
+    d, _, sy = _batch(x=3)
+    sx = torch.tensor([1, value], dtype=torch.uint64)
+    with pytest.raises(RuntimeError, match="sx values must not exceed"):
+        dtw_batch(d, sx, sy.to(torch.uint64), symmetric=False)
+    with pytest.raises(RuntimeError, match="sy values must not exceed"):
+        dtw_batch(d, sy=sx)
+
+
 def test_dtw_batch_length_exceeds_block() -> None:
     """dtw_batch rejects sx values larger than distances.size(2)."""
     d, _, sy = _batch(x=3)

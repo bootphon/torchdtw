@@ -105,6 +105,48 @@ def test_fake_dtw_batch_rejects_like_cpu(args: tuple, match: str) -> None:
         op(*(mode.from_tensor(a) if isinstance(a, torch.Tensor) else a for a in args))
 
 
+@pytest.mark.parametrize(
+    ("distances", "match"),
+    [
+        (torch.empty(2, 3, 4), "2D"),
+        (torch.empty(0, 3), "Empty input tensor"),
+        (torch.empty(3, 0), "Empty input tensor"),
+        (torch.empty(3, 3, dtype=torch.bool), "not implemented"),
+    ],
+)
+def test_fake_dtw_rejects_like_cpu(distances: torch.Tensor, match: str) -> None:
+    """The fake dtw kernel rejects the same invalid inputs as the CPU kernel."""
+    op = torch.ops.torchdtw.dtw.default
+    with pytest.raises(RuntimeError, match=match):
+        op(distances)
+    with FakeTensorMode() as mode, pytest.raises(RuntimeError, match=match):
+        op(mode.from_tensor(distances))
+
+
+@given(x=DIM, y=DIM, low=LOW, high_minus_low=HIGH_MINUS_LOW)
+def test_opcheck_dtw_path(x: int, y: int, low: float, high_minus_low: float) -> None:
+    """Verify that dtw_path can be torch compiled."""
+    sample = make_tensor((x, y), dtype=torch.float32, low=low, high=high_minus_low + low)
+    opcheck(torch.ops.torchdtw.dtw_path.default, (sample,))
+
+
+@pytest.mark.parametrize(
+    ("distances", "match"),
+    [
+        (torch.empty(2, 3, 4), "2D"),
+        (torch.empty(0, 3), "Empty input tensor"),
+        (torch.empty(3, 3, dtype=torch.bool), "not implemented"),
+    ],
+)
+def test_fake_dtw_path_rejects_like_cpu(distances: torch.Tensor, match: str) -> None:
+    """The fake dtw_path kernel rejects the same invalid inputs as the CPU kernel."""
+    op = torch.ops.torchdtw.dtw_path.default
+    with pytest.raises(RuntimeError, match=match):
+        op(distances)
+    with FakeTensorMode() as mode, pytest.raises(RuntimeError, match=match):
+        op(mode.from_tensor(distances))
+
+
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
 def test_opcheck_unnormalized(device: str) -> None:
     """Both ops can be torch compiled with normalize=False."""

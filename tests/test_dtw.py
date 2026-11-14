@@ -4,7 +4,7 @@ import pytest
 import torch
 from hypothesis import given
 
-from torchdtw import dtw, dtw_batch
+from torchdtw import dtw, dtw_batch, dtw_path
 
 from .conftest import BATCH, DIM, HIGH_MINUS_LOW, LOW, assert_equal, make_tensor
 
@@ -46,3 +46,14 @@ def test_dtw_batch_not_symmetric(
         dtw_batch(d, sx, sy, symmetric=False),
         dtw_batch(d.cuda(), sx.cuda(), sy.cuda(), symmetric=False).cpu(),
     )
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+def test_not_differentiable(device: str) -> None:
+    """dtw and dtw_batch are not differentiable: their outputs do not require grad, so backward raises."""
+    d = torch.rand(1, 1, 3, 4, device=device, requires_grad=True)
+    for out in (dtw(d[0, 0]), dtw_batch(d)):
+        assert not out.requires_grad
+        with pytest.raises(RuntimeError, match="does not require grad"):
+            out.sum().backward()
+    assert not dtw_path(d[0, 0]).requires_grad

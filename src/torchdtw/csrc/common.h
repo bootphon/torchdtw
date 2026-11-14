@@ -143,12 +143,19 @@ template <typename F> inline void for_upper_triangle(int64_t start, int64_t end,
   }
 }
 
+inline bool length_within(const Lengths& lengths, int64_t i, int64_t size) {
+  const int64_t value = lengths[i];
+  if (lengths.dtype == torch::headeronly::ScalarType::UInt64)
+    return static_cast<uint64_t>(value) <= static_cast<uint64_t>(size);
+  return value <= size;
+}
+
 inline void check_lengths(const Lengths& sx, const Lengths& sy, int64_t n1, int64_t n2, int64_t s1, int64_t s2) {
   for (int64_t x = 0; x < n1; x++) {
-    STD_TORCH_CHECK(sx[x] <= s1, "sx values must not exceed distances.size(-2)");
+    STD_TORCH_CHECK(length_within(sx, x, s1), "sx values must not exceed distances.size(-2)");
   }
   for (int64_t y = 0; y < n2; y++) {
-    STD_TORCH_CHECK(sy[y] <= s2, "sy values must not exceed distances.size(-1)");
+    STD_TORCH_CHECK(length_within(sy, y, s2), "sy values must not exceed distances.size(-1)");
   }
 }
 

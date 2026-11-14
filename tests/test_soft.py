@@ -7,6 +7,7 @@ import pytest
 import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.library import opcheck
 
 import torchdtw
@@ -246,24 +247,99 @@ def test_r_kept_only_for_backward() -> None:
         torch.ops.torchdtw.soft_dtw_backward(torch.ones(2), d, torch.empty(0), None, None, 1.0, symmetric=False)
 
 
-@pytest.mark.parametrize(
-    ("args", "match"),
-    [
-        ((torch.rand(5, 5), None, None, 1.0), "3D"),
-        ((torch.rand(1, 5, 5), None, None, 0.0), "gamma"),
-        ((torch.randint(0, 9, (1, 5, 5)), None, None, 1.0), "float"),
-        ((torch.rand(1, 5, 5), torch.tensor([[5]]), None, 1.0), "1D"),
-        ((torch.rand(2, 5, 5), torch.tensor([5, 5, 5]), None, 1.0), "sizes must match"),
-        ((torch.rand(1, 5, 5), torch.tensor([5.0]), None, 1.0), "integer dtype"),
-        ((torch.rand(1, 5, 5), torch.tensor([5]), torch.tensor([5], dtype=torch.int32), 1.0), "dtypes do not match"),
-        ((torch.rand(1, 5, 5), torch.tensor([6]), None, 1.0), "sx values must not exceed"),
-        ((torch.rand(2, 3, 5, 5), None, torch.tensor([5, 5, 6]), 1.0), "sy values must not exceed"),
-    ],
-)
+UINT64_HUGE = torch.tensor([2**63 + 5], dtype=torch.uint64)
+INVALID_INPUTS = [
+    ((torch.rand(5, 5), None, None, 1.0), "3D"),
+    ((torch.rand(1, 5, 5), None, None, 0.0), "gamma"),
+    ((torch.randint(0, 9, (1, 5, 5)), None, None, 1.0), "float"),
+    ((torch.rand(1, 5, 5), torch.tensor([[5]]), None, 1.0), "1D"),
+    ((torch.rand(2, 5, 5), torch.tensor([5, 5, 5]), None, 1.0), "sizes must match"),
+    ((torch.rand(1, 5, 5), torch.tensor([5.0]), None, 1.0), "integer dtype"),
+    ((torch.rand(1, 5, 5), torch.tensor([5]), torch.tensor([5], dtype=torch.int32), 1.0), "dtypes do not match"),
+    ((torch.rand(1, 5, 5), torch.tensor([6]), None, 1.0), "sx values must not exceed"),
+    ((torch.rand(2, 3, 5, 5), None, torch.tensor([5, 5, 6]), 1.0), "sy values must not exceed"),
+    ((torch.rand(1, 5, 5), UINT64_HUGE, None, 1.0), "sx values must not exceed"),
+]
+
+
+@pytest.mark.parametrize(("args", "match"), INVALID_INPUTS)
 def test_validation(args: tuple, match: str) -> None:
     """Invalid inputs are rejected with an explicit message."""
     with pytest.raises(RuntimeError, match=match):
         torch.ops.torchdtw.soft_dtw(*args, -1, symmetric=False, keep_R=False)
+
+
+def fake(args: tuple, mode: FakeTensorMode) -> tuple:
+    """``args`` with their tensors converted to fake tensors of ``mode``."""
+    return tuple(mode.from_tensor(a) if isinstance(a, torch.Tensor) else a for a in args)
+
+
+# Whose checks need the values of the lengths, which a fake kernel does not have.
+VALUE_CHECKS = {"sx values must not exceed", "sy values must not exceed"}
+SYMMETRIC_INPUTS = [
+    ((torch.rand(3, 5, 5), None, None, 1.0), "symmetric soft_dtw requires"),
+    ((torch.rand(2, 3, 5, 5), None, None, 1.0), "symmetric soft_dtw requires"),
+]
+
+
+@pytest.mark.parametrize(
+    ("args", "match", "symmetric"),
+    [(*case, False) for case in INVALID_INPUTS if case[1] not in VALUE_CHECKS]
+    + [(*case, True) for case in SYMMETRIC_INPUTS],
+)
+def test_fake_soft_dtw_rejects_like_cpu(args: tuple, match: str, symmetric: bool) -> None:
+    """The fake soft_dtw and soft_dtw_backward kernels reject the same invalid inputs as the CPU kernels."""
+    distances = args[0]
+    R = torch.empty(distances.shape, dtype=torch.float32)
+    grad = torch.empty(distances.shape[:-2])
+    forward = (*args, -1, symmetric, False)
+    backward = (grad, distances, R, *args[1:], symmetric)
+    for op, op_args in (
+        (torch.ops.torchdtw.soft_dtw.default, forward),
+        (torch.ops.torchdtw.soft_dtw_backward, backward),
+    ):
+        with pytest.raises(RuntimeError, match=match):
+            op(*op_args)
+        with FakeTensorMode() as mode, pytest.raises(RuntimeError, match=match):
+            op(*fake(op_args, mode))
+
+
+@pytest.mark.parametrize(
+    ("grad", "R", "match"),
+    [
+        (torch.ones(2), torch.empty(0), "keep_R=True"),
+        (torch.ones(2), torch.empty(2, 4, 3), "shape of distances"),
+        (torch.ones(2), torch.empty(2, 4, 3).transpose(1, 2), "contiguous"),
+        (torch.ones(2), torch.empty(2, 3, 4, dtype=torch.float64), "accumulation dtype"),
+        (torch.ones(3), torch.empty(2, 3, 4), "shape of the soft_dtw output"),
+        (torch.ones(2, dtype=torch.float64), torch.empty(2, 3, 4), "dtype of distances"),
+    ],
+)
+def test_fake_soft_dtw_backward_rejects_like_cpu(grad: torch.Tensor, R: torch.Tensor, match: str) -> None:
+    """The fake soft_dtw_backward kernel checks grad and R as the CPU kernel."""
+    args = (grad, torch.rand(2, 3, 4), R, None, None, 1.0, False)
+    op = torch.ops.torchdtw.soft_dtw_backward.default
+    with pytest.raises(RuntimeError, match=match):
+        op(*args)
+    with FakeTensorMode() as mode, pytest.raises(RuntimeError, match=match):
+        op(*fake(args, mode))
+
+
+def test_double_backward_raises() -> None:
+    """The backward is once differentiable: with create_graph, differentiating the gradient again raises.
+
+    When the incoming gradient requires grad, autograd raises its once_differentiable error. Otherwise, the gradient
+    has no grad_fn, and differentiating it raises too.
+    """
+    d = torch.rand(2, 3, 4, dtype=torch.float64, requires_grad=True)
+    w = torch.rand(2, dtype=torch.float64, requires_grad=True)
+    (grad,) = torch.autograd.grad((soft_dtw(d) * w).sum(), d, create_graph=True)
+    with pytest.raises(RuntimeError, match="once_differentiable"):
+        grad.sum().backward()
+    (grad,) = torch.autograd.grad(soft_dtw(d).sum(), d, create_graph=True)
+    assert grad.grad_fn is None
+    with pytest.raises(RuntimeError, match="does not require grad"):
+        torch.autograd.grad(grad.sum(), d)
 
 
 @pytest.mark.parametrize("shape", [(3, 5, 5), (2, 3, 5, 5)])

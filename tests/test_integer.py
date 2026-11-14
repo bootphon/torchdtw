@@ -1,8 +1,9 @@
-"""Integer-dtype correctness: floor-division semantics and the narrow path-length guard.
+"""Integer-dtype correctness: division semantics, exact int64 results and the narrow path-length guard.
 
-Integer dtypes divide the accumulated cost by the path length in int64 and floor the result.
-The rest of the suite only checks CPU/CUDA parity for integers, which is blind to a shared
-logic bug, so these tests anchor the integer result to an independent floor-division reference.
+Integer dtypes divide the accumulated cost by the path length in int64, which rounds toward zero: a negative
+cost of -7 over a path of 2 gives -3, not the floor -4. The rest of the suite only checks CPU/CUDA parity for
+integers, which is blind to a shared logic bug, so these tests anchor the integer result to an independent
+reference.
 
 They also pin the documented div-by-zero guard: the path length must not be cast to the (narrow)
 storage dtype before dividing -- a length of 256 becomes 0 as int8/uint8, and ``cost / 0`` traps
@@ -21,15 +22,17 @@ from .conftest import assert_equal, make_tensor
 from .reference import reference_dtw_int
 
 INTEGRAL_DTYPES = [torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64]
-# Values 0..3 over <= 8x8 keep the cost <= 15 * 3 = 45, within int8/uint8, so the float64
-# reference cost is the exact integer cost and floor division reproduces the kernels.
+SIGNED_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64]
+DEVICES = ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)]
+# Values 0..3 (or -4..3) over <= 8x8 keep |cost| <= 15 * 4 = 60, within int8/uint8, so the float64
+# reference cost is the exact integer cost and its truncated quotient reproduces the kernels.
 SMALL = st.integers(1, 8)
 
 
 @pytest.mark.parametrize("dtype", INTEGRAL_DTYPES)
 @given(x=SMALL, y=SMALL)
-def test_dtw_integer_floor_division_cpu(dtype: torch.dtype, x: int, y: int) -> None:
-    """CPU integer dtw matches the independent floor-division reference."""
+def test_dtw_integer_division_cpu(dtype: torch.dtype, x: int, y: int) -> None:
+    """CPU integer dtw matches the independent integer-division reference."""
     d = make_tensor((x, y), dtype=dtype, low=0, high=4)
     expected = torch.tensor(reference_dtw_int(d.numpy()), dtype=dtype)
     assert_equal(dtw(d), expected)
@@ -38,11 +41,42 @@ def test_dtw_integer_floor_division_cpu(dtype: torch.dtype, x: int, y: int) -> N
 @pytest.mark.requires_gpu
 @pytest.mark.parametrize("dtype", INTEGRAL_DTYPES)
 @given(x=SMALL, y=SMALL)
-def test_dtw_integer_floor_division_cuda(dtype: torch.dtype, x: int, y: int) -> None:
-    """CUDA integer dtw matches the independent floor-division reference."""
+def test_dtw_integer_division_cuda(dtype: torch.dtype, x: int, y: int) -> None:
+    """CUDA integer dtw matches the independent integer-division reference."""
     d = make_tensor((x, y), dtype=dtype, low=0, high=4)
     expected = torch.tensor(reference_dtw_int(d.numpy()), dtype=dtype)
     assert_equal(dtw(d.cuda()).cpu(), expected)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", SIGNED_DTYPES)
+def test_dtw_negative_integer_rounds_toward_zero(device: str, dtype: torch.dtype) -> None:
+    """A negative cost is rounded toward zero, not floored: -7 over a path of 2 gives -3, not -4."""
+    d = torch.tensor([[-3, -4]], dtype=dtype, device=device)
+    assert_equal(dtw(d).cpu(), torch.tensor(-3, dtype=dtype))
+    assert_equal(dtw_batch(d[None, None]).cpu(), torch.tensor([[-3]], dtype=dtype))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", SIGNED_DTYPES)
+@given(x=SMALL, y=SMALL)
+def test_dtw_negative_integer_division(device: str, dtype: torch.dtype, x: int, y: int) -> None:
+    """Integer dtw with negative distances matches the reference, which rounds toward zero."""
+    d = make_tensor((x, y), dtype=dtype, low=-4, high=4)
+    expected = torch.tensor(reference_dtw_int(d.numpy()), dtype=dtype)
+    assert_equal(dtw(d.to(device)).cpu(), expected)
+    assert_equal(dtw_batch(d[None, None].to(device)).cpu(), expected[None, None])
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("normalize", [True, False])
+def test_dtw_int64_exact_above_2_53(device: str, normalize: bool) -> None:
+    """int64 costs above 2^53, where float64 has no exact integers, come out exact from dtw and dtw_batch."""
+    value = 2**53 + 1
+    d = torch.tensor([[value]], dtype=torch.int64, device=device)
+    expected = torch.tensor(value, dtype=torch.int64)
+    assert_equal(dtw(d, normalize=normalize).cpu(), expected)
+    assert_equal(dtw_batch(d[None, None], normalize=normalize).cpu(), expected[None, None])
 
 
 @pytest.mark.parametrize("dtype", [torch.int8, torch.uint8])

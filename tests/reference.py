@@ -62,17 +62,18 @@ def reference_dtw(distances: npt.NDArray) -> float:
 
 
 def reference_dtw_int(distances: npt.NDArray) -> int:
-    """Integer floor-division DTW, matching the integer-dtype kernels.
+    """Integer DTW, divided by the path length and rounded toward zero, matching the integer-dtype kernels.
 
-    The kernels accumulate the cost in the storage dtype and then divide in int64 (floor). When
-    the cost does not overflow the storage dtype, the float64 ``reference_cost`` holds the exact
-    integer cost, so flooring it and integer-dividing by the path length reproduces the kernels.
-    Only valid for inputs small enough that the cost stays within the dtype -- the integer tests
-    keep values and dimensions small precisely so this holds.
+    The kernels accumulate the cost in a wide integer dtype and then divide in int64, which rounds toward zero. When
+    the cost is small enough, the float64 ``reference_cost`` holds the exact integer cost, so truncating the
+    quotient of its integer value by the path length reproduces the kernels. Only valid for such inputs: the
+    integer tests keep values and dimensions small precisely so this holds.
     """
     cost = reference_cost(distances)
     path = reference_path(cost)
-    return int(cost[-1, -1]) // len(path)
+    total = int(cost[-1, -1])
+    quotient = abs(total) // len(path)
+    return quotient if total >= 0 else -quotient
 
 
 def reference_dtw_batch(
