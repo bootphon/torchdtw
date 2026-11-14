@@ -96,9 +96,12 @@ Tensor dtw_cpu(const Tensor& distances, bool normalize) {
   STD_TORCH_CHECK(distances.dim() == 2, "distances must be a 2D tensor");
   const int64_t N = distances.size(0);
   const int64_t M = distances.size(1);
-  STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
   Tensor out = torch::stable::new_empty(distances, torch::headeronly::IntHeaderOnlyArrayRef());
   dispatch_dtw(distances.scalar_type(), [&]<typename scalar_t>() {
+    if (N == 0 || M == 0) { // An empty pair, of cost 0 as in dtw_batch.
+      *reinterpret_cast<scalar_t*>(out.data_ptr()) = scalar_t(0);
+      return;
+    }
     dispatch_acc<scalar_t>(N + M - 1, [&]<typename acc>() {
       thread_local std::vector<acc> cached;
       std::vector<acc> temporary;
@@ -129,10 +132,12 @@ Tensor dtw_path_cpu(const Tensor& distances) {
   STD_TORCH_CHECK(distances.dim() == 2, "distances must be a 2D tensor");
   const int64_t N = distances.size(0);
   const int64_t M = distances.size(1);
-  STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
-  Tensor out = torch::stable::new_empty(distances, {N + M - 1, 2}, torch::headeronly::ScalarType::Long);
+  const bool empty = N == 0 || M == 0; // An empty pair has an empty path.
+  Tensor out = torch::stable::new_empty(distances, {empty ? 0 : N + M - 1, 2}, torch::headeronly::ScalarType::Long);
   int64_t length = 0;
   dispatch_dtw(distances.scalar_type(), [&]<typename scalar_t>() {
+    if (empty)
+      return;
     dispatch_acc<scalar_t>(N + M - 1, [&]<typename acc>() {
       std::vector<acc> cost(N * M);
       compute_dtw_cost<scalar_t, acc>(accessor<const scalar_t, 2>(distances), N, M, cost.data());

@@ -3,19 +3,9 @@
 import torch
 
 from ._dtw import check_lengths_tensors
-from ._windows import check_no_cuda_on_windows
+from ._errors import RankError, SinglePairLengthsError, check_no_cuda_on_windows
 
 __all__ = ["soft_dtw", "soft_dtw_batch"]
-
-
-class RankError(RuntimeError):
-    def __init__(self, expected: str, actual: int) -> None:
-        super().__init__(f"distances must be a {expected} tensor, got {actual}D")
-
-
-class SinglePairLengthsError(RuntimeError):
-    def __init__(self) -> None:
-        super().__init__("sx and sy are only accepted with 3D distances: a 2D tensor is a single pair, read whole")
 
 
 def _soft_dtw(

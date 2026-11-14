@@ -105,12 +105,20 @@ def test_fake_dtw_batch_rejects_like_cpu(args: tuple, match: str) -> None:
         op(*(mode.from_tensor(a) if isinstance(a, torch.Tensor) else a for a in args))
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("shape", [(0, 3), (3, 0), (0, 0)])
+def test_opcheck_empty(shape: tuple[int, int], device: str) -> None:
+    """The fake dtw and dtw_path kernels accept empty inputs, as the real ones."""
+    sample = torch.empty(shape, device=device)
+    opcheck(torch.ops.torchdtw.dtw.default, (sample,))
+    if device == "cpu":
+        opcheck(torch.ops.torchdtw.dtw_path.default, (sample,))
+
+
 @pytest.mark.parametrize(
     ("distances", "match"),
     [
         (torch.empty(2, 3, 4), "2D"),
-        (torch.empty(0, 3), "Empty input tensor"),
-        (torch.empty(3, 0), "Empty input tensor"),
         (torch.empty(3, 3, dtype=torch.bool), "not implemented"),
     ],
 )
@@ -134,7 +142,6 @@ def test_opcheck_dtw_path(x: int, y: int, low: float, high_minus_low: float) -> 
     ("distances", "match"),
     [
         (torch.empty(2, 3, 4), "2D"),
-        (torch.empty(0, 3), "Empty input tensor"),
         (torch.empty(3, 3, dtype=torch.bool), "not implemented"),
     ],
 )

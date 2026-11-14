@@ -62,7 +62,8 @@ Defaults to s1.
 - **sy** (<code>Tensor | None</code>) – An optional 1D integer tensor of shape (n2,) with the lengths of the second batch, at most s2.
 Defaults to s2.
 - **symmetric** (<code>bool</code>) – Whether the two batches are the same: only the pairs ``i < j`` are computed, and mirrored,
-and the diagonal is 0. Requires ``n1 == n2``.
+and the diagonal is 0, the cost of a sequence with itself when the distance of a frame to itself is 0.
+Requires ``n1 == n2``.
 - **normalize** (<code>bool</code>) – Whether to divide each cost by the length of its warping path.
 
 **Returns:**
@@ -239,12 +240,12 @@ for both, and must be on the device of `distances`.
 
 | Case | CPU | CUDA |
 |---|---|---|
-| `dtw` or `dtw_path` with `n == 0` or `m == 0` | Raises. | Raises. |
-| 2D `soft_dtw` with `N == 0` or `M == 0` | Cost 0. | Cost 0. |
+| 2D `dtw` or `soft_dtw` with `n == 0` or `m == 0` | Empty pair: cost 0, as in the batch ops. | Same. |
+| `dtw_path` with `n == 0` or `m == 0` | Empty path, of shape (0, 2). | Same. |
 | Empty batch: `n1 == 0`, `n2 == 0` or `B == 0` | Empty output. | Empty output. |
 | `s1 == 0` or `s2 == 0`, or a length <= 0 | Empty pair: cost 0, and gradient 0 for soft-DTW. | Same. |
 | A length larger than the padded size (`sx[i] > s1`) | Raises. | Device-side assert. |
-| A uint64 length >= 2^63 | Raises. | Read as negative: empty pair, cost 0. |
+| A uint64 length >= 2^63 | Raises. | Device-side assert. |
 | A pair whose longest path has more than 65535 cells (`n + m - 1 > 65535` for `dtw`, `sx[i] + sy[j] - 1 > 65535` for the others) | No limit. | Raises when neither `sx` nor `sy` is given (checked on the padded sizes); device-side assert otherwise. |
 | `n1` or `n2` above 2^31 - 1, or more than 2^31 - 1 pairs with `symmetric` | No limit. | Raises. |
 

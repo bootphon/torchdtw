@@ -2,7 +2,7 @@
 
 import torch
 
-from ._windows import check_no_cuda_on_windows
+from ._errors import RankError, check_no_cuda_on_windows
 
 __all__ = ["dtw", "dtw_batch", "dtw_path"]
 
@@ -17,6 +17,8 @@ def dtw(distances: torch.Tensor, *, normalize: bool = True) -> torch.Tensor:
     :param normalize: Whether to divide the cost by the length of the warping path.
     :returns: A scalar tensor with the cost.
     """
+    if distances.ndim != 2:
+        raise RankError("2D", distances.ndim)
     check_no_cuda_on_windows(distances)
     if distances.requires_grad:
         distances = distances.detach()
@@ -32,6 +34,8 @@ def dtw_path(distances: torch.Tensor) -> torch.Tensor:
     :param distances: A 2D tensor of shape (n, m) with the pairwise distances between two sequences.
     :returns: A 2D tensor of shape (*, 2) with the indices of the path, from (0, 0) to (n - 1, m - 1).
     """
+    if distances.ndim != 2:
+        raise RankError("2D", distances.ndim)
     return torch.ops.torchdtw.dtw_path.default(distances.cpu()).to(distances.device)
 
 
@@ -56,10 +60,13 @@ def dtw_batch(
     :param sy: An optional 1D integer tensor of shape (n2,) with the lengths of the second batch, at most s2.
         Defaults to s2.
     :param symmetric: Whether the two batches are the same: only the pairs ``i < j`` are computed, and mirrored,
-        and the diagonal is 0. Requires ``n1 == n2``.
+        and the diagonal is 0, the cost of a sequence with itself when the distance of a frame to itself is 0.
+        Requires ``n1 == n2``.
     :param normalize: Whether to divide each cost by the length of its warping path.
     :returns: A 2D tensor of shape (n1, n2) with the costs.
     """
+    if distances.ndim != 4:
+        raise RankError("4D", distances.ndim)
     check_no_cuda_on_windows(distances)
     if distances.requires_grad:
         distances = distances.detach()
@@ -112,8 +119,6 @@ def _(distances: torch.Tensor, normalize: bool = True) -> torch.Tensor:
     """Register the FakeTensor kernel for dtw, for compatibility with torch.compile."""
     torch._check(distances.ndim == 2, lambda: "distances must be a 2D tensor")
     torch._check(distances.dtype in _DISTANCES_DTYPES, lambda: f"dtw not implemented for {distances.dtype}")
-    torch._check(distances.shape[0] > 0, lambda: "Empty input tensor")
-    torch._check(distances.shape[1] > 0, lambda: "Empty input tensor")
     return torch.empty((), dtype=distances.dtype, layout=distances.layout, device=distances.device)
 
 
@@ -123,14 +128,12 @@ def _(distances: torch.Tensor) -> torch.Tensor:
     torch._check(distances.ndim == 2, lambda: "distances must be a 2D tensor")
     torch._check(distances.dtype in _DISTANCES_DTYPES, lambda: f"dtw not implemented for {distances.dtype}")
     n, m = distances.shape
-    torch._check(n > 0 and m > 0, lambda: "Empty input tensor")
-    ctx = torch.library.get_ctx()
     if isinstance(n, int) and isinstance(m, int):
-        path_len = ctx.new_dynamic_size(min=max(n, m), max=n + m - 1)
+        if n == 0 or m == 0:  # An empty pair has an empty path.
+            return distances.new_empty((0, 2), dtype=torch.long)
+        path_len = torch.library.get_ctx().new_dynamic_size(min=max(n, m), max=n + m - 1)
     else:  # new_dynamic_size only takes static bounds
-        path_len = ctx.new_dynamic_size()
-        torch._check(path_len >= n)
-        torch._check(path_len >= m)
+        path_len = torch.library.get_ctx().new_dynamic_size()
         torch._check(path_len <= n + m - 1)
     return distances.new_empty((path_len, 2), dtype=torch.long)
 

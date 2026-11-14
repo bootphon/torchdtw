@@ -11,7 +11,8 @@ import sys
 import pytest
 import torch
 
-from torchdtw import dtw, dtw_batch, dtw_path
+from torchdtw import dtw, dtw_batch, dtw_path, soft_dtw
+from torchdtw._errors import RankError
 
 from .conftest import assert_equal, make_tensor
 
@@ -23,19 +24,42 @@ def _batch(n: int = 2, m: int = 2, x: int = 3, y: int = 3) -> tuple[torch.Tensor
     return d, sx, sy
 
 
-@pytest.mark.parametrize("op", [dtw, dtw_path])
-def test_dtw_requires_2d(op) -> None:
-    """Dtw / dtw_path reject non-2D inputs."""
-    with pytest.raises(RuntimeError, match="2D tensor"):
-        op(make_tensor((2, 3, 4), dtype=torch.float32, low=0.0, high=1.0))
+@pytest.mark.parametrize(("op", "ndim"), [(dtw, 2), (dtw_path, 2), (dtw_batch, 4)])
+def test_dtw_rank_error(op, ndim: int) -> None:
+    """Dtw / dtw_path / dtw_batch reject distances of the wrong rank in Python, with the RankError of soft-DTW."""
+    for shape in [(3,), (2, 3, 4), (1, 1, 2, 2, 2)]:
+        if len(shape) != ndim:
+            with pytest.raises(RankError, match=f"must be a {ndim}D tensor, got {len(shape)}D"):
+                op(torch.rand(shape))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.int32, torch.uint8])
+@pytest.mark.parametrize("shape", [(0, 3), (3, 0), (0, 0)])
+def test_dtw_empty(shape: tuple[int, int], dtype: torch.dtype, device: str) -> None:
+    """An empty 2D input is an empty pair: dtw is 0 as in dtw_batch and soft_dtw, and dtw_path is empty."""
+    d = torch.empty(shape, dtype=dtype, device=device)
+    for normalize in (True, False):
+        cost = dtw(d, normalize=normalize)
+        assert cost.shape == ()
+        assert cost.dtype == dtype
+        assert cost.device == d.device
+        assert_equal(cost, dtw_batch(d[None, None], normalize=normalize)[0, 0])
+        assert_equal(cost, torch.zeros((), dtype=dtype, device=device))
+    path = dtw_path(d)
+    assert path.shape == (0, 2)
+    assert path.dtype == torch.long
+    assert path.device == d.device
+    if dtype.is_floating_point:
+        assert_equal(cost, soft_dtw(d).to(dtype))
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
 @pytest.mark.parametrize("op", [dtw, dtw_path])
-def test_dtw_rejects_empty(op, device: str) -> None:
-    """Dtw / dtw_path reject an empty 2D tensor: an empty sequence has no alignment path to normalize by."""
-    with pytest.raises(RuntimeError, match="Empty input tensor"):
-        op(torch.empty((0, 3), dtype=torch.float32, device=device))
+def test_dtw_empty_unsupported_dtype(op, device: str) -> None:
+    """An empty input of an unsupported dtype is still rejected."""
+    with pytest.raises(RuntimeError, match="not implemented"):
+        op(torch.empty((0, 3), dtype=torch.bool, device=device))
 
 
 EMPTY_SHAPES = {"n1 == 0": (0, 0, 3, 4), "s1 == 0": (2, 2, 0, 4), "s2 == 0": (2, 2, 3, 0)}
@@ -160,6 +184,11 @@ OUT_OF_RANGE_CASES = {
     "dtw_batch int64": "torchdtw.dtw_batch(d, s64, torch.tensor([1, 5], device='cuda'), symmetric=True)",
     "dtw_batch int16": "torchdtw.dtw_batch(d, torch.tensor([5, 1], dtype=torch.int16, device='cuda'))",
     "dtw_batch s2 == 0": "torchdtw.dtw_batch(d[..., :0], s32, torch.tensor([1, 0], dtype=torch.int32, device='cuda'))",
+    "dtw_batch uint64 >= 2^63": "torchdtw.dtw_batch(d, torch.tensor([2**63 + 5, 1], dtype=torch.uint64, device='cuda'))",
+    "dtw_batch uint64 2^64 - 1": "torchdtw.dtw_batch(d, sy=torch.tensor([1, 2**64 - 1], dtype=torch.uint64, device='cuda'))",
+    "soft_dtw uint64 >= 2^63": "torchdtw.soft_dtw(d[0], torch.tensor([2**63, 1], dtype=torch.uint64, device='cuda'))",
+    "soft_dtw_batch uint64 >= 2^63": "torchdtw.soft_dtw_batch(d, None, torch.tensor([1, 2**63], dtype=torch.uint64, "
+    "device='cuda'))",
     "dtw_batch path length": "torchdtw.dtw_batch(torch.zeros(1, 1, 1, 70000, device='cuda'), "
     "torch.tensor([1], device='cuda'), torch.tensor([70000], device='cuda'))",
 }

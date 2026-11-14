@@ -93,8 +93,12 @@ template <typename length_t = void> struct PairLengths {
         using T = decltype(t);
         const T* const px = static_cast<const T*>(sx.data);
         const T* const py = static_cast<const T*>(sy.data);
-        const T a = px != nullptr ? px[x * sx.stride] : T();
-        const T b = py != nullptr ? py[y * sy.stride] : T();
+        T a = px != nullptr ? px[x * sx.stride] : T();
+        T b = py != nullptr ? py[y * sy.stride] : T();
+        if constexpr (std::is_same_v<T, uint64_t>) {
+          a = min(a, static_cast<uint64_t>(INT64_MAX));
+          b = min(b, static_cast<uint64_t>(INT64_MAX));
+        }
         m = py != nullptr ? static_cast<int64_t>(b) : sy.fallback;
         return px != nullptr ? static_cast<int64_t>(a) : sx.fallback;
       });

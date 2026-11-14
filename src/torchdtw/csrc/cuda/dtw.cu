@@ -226,7 +226,6 @@ Tensor dtw_cuda(const Tensor& distances, bool normalize) {
   STD_TORCH_CHECK(distances.dim() == 2, "distances must be a 2D tensor");
   const int64_t N = distances.size(0);
   const int64_t M = distances.size(1);
-  STD_TORCH_CHECK(N > 0 && M > 0, "Empty input tensor");
   const Tensor result =
       dtw_batch_cuda(torch::stable::view(distances, {1, 1, N, M}), nullptr, nullptr, false, normalize);
   return torch::stable::view(result, torch::headeronly::IntHeaderOnlyArrayRef());
