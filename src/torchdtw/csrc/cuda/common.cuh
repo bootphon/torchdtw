@@ -99,8 +99,10 @@ template <typename length_t = void> struct PairLengths {
         return px != nullptr ? static_cast<int64_t>(a) : sx.fallback;
       });
       in_range = n <= sx.fallback && m <= sy.fallback && n + m - 1 <= MAX_PATH_LENGTH;
-      N = static_cast<int32_t>(n);
-      M = static_cast<int32_t>(m);
+      const int32_t n32 = static_cast<int32_t>(n < sx.fallback ? n : sx.fallback);
+      const int32_t m32 = static_cast<int32_t>(m < sy.fallback ? m : sy.fallback);
+      N = n32 < 0 ? 0 : n32;
+      M = m32 < 0 ? 0 : m32;
     } else {
       const length_t n = static_cast<const length_t*>(sx.data)[x * sx.stride];
       const length_t m = static_cast<const length_t*>(sy.data)[y * sy.stride];

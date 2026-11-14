@@ -1,5 +1,7 @@
 """Compare torchdtw's ``dtw`` and ``dtw_batch`` between two builds: correctness, then speed.
 
+Also ``soft_dtw`` and ``soft_dtw_batch``, forward and forward + backward, when both builds have them.
+
 Driven by the ``compare`` subcommand of ``python -m dtw_benchmark`` (the CLI lives in ``__main__``). Each side, the
 baseline and the candidate, is a wheel path, a version spec (``torchdtw==1.2.3``) or ``installed``, the torchdtw of
 the current environment. ``driver`` installs each side other than ``installed`` into its own temporary directory
@@ -7,8 +9,8 @@ with ``uv pip install --no-deps --target``, then measures both sides the same wa
 interpreter runs this module as a script, with the side's directory first on ``PYTHONPATH`` so that its torchdtw
 shadows the installed one. Both sides then share the interpreter and torch, and only torchdtw differs.
 
-Running this module as a script puts its own directory on ``sys.path``: the child imports ``cases`` and ``timing``
-as sibling modules, which only depend on torch.
+Running this module as a script puts its own directory on ``sys.path``: the child imports ``cases``,
+``soft_cases`` and ``timing`` as sibling modules, which only depend on torch.
 """
 
 import argparse
@@ -19,6 +21,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import types
 from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -27,9 +30,10 @@ import torch
 from torch.utils.benchmark import Compare, Measurement
 
 if __package__:
-    from . import cases, timing
+    from . import cases, soft_cases, timing
 else:  # run as a script by ``driver``
     import cases  # ty: ignore[import-not-found]
+    import soft_cases  # ty: ignore[import-not-found]
     import timing  # ty: ignore[import-not-found]
 
 INSTALLED = "installed"
@@ -123,7 +127,44 @@ def measure_all(
                             f"{cases.batch_label(config, spread)} {str(dtype).removeprefix('torch.')}{threads}",
                             num_threads,
                         )
+        if hasattr(torchdtw, "soft_dtw"):
+            measure_soft(torchdtw, measure, device, thread_counts, seed)
     return outputs, timings
+
+
+def measure_soft(
+    torchdtw: types.ModuleType,
+    measure: Callable[..., None],
+    device: torch.device,
+    thread_counts: list[int],
+    seed: int,
+) -> None:
+    """Measure ``soft_dtw`` on the paired cases and ``soft_dtw_batch`` on the batch cases, with int32 lengths.
+
+    Each one forward, then forward and backward (to the gradient of the sum of the costs).
+    """
+
+    def both_passes(op: Callable[..., torch.Tensor], d: torch.Tensor, *args: object, **kwargs: object) -> dict:
+        def forward(d: torch.Tensor = d) -> torch.Tensor:
+            return op(d, *args, gamma=soft_cases.GAMMA, **kwargs)
+
+        return {"fwd": forward, "fwd+bwd": lambda: soft_cases.gradient(forward, d)}
+
+    calls = []
+    for config in soft_cases.CONFIGS:
+        for spread in cases.SPREADS:
+            d, sx, sy = soft_cases.paired_inputs(config, spread, device=device, seed=seed)
+            for passes, fn in both_passes(torchdtw.soft_dtw, d, sx, sy).items():
+                calls.append((fn, "soft_dtw", f"{soft_cases.config_label(config, spread)} {passes}"))
+    for config in cases.BATCH_CONFIGS:
+        for spread in cases.SPREADS:
+            d, sx, sy = cases.batch_inputs(config, spread, device=device, seed=seed)
+            for passes, fn in both_passes(torchdtw.soft_dtw_batch, d, sx, sy, symmetric=config[-1]).items():
+                calls.append((fn, "soft_dtw_batch", f"{cases.batch_label(config, spread)} {passes}"))
+    for fn, op, sub_label in calls:
+        for num_threads in thread_counts:
+            threads = f" t={num_threads}" if device.type == "cpu" else ""
+            measure(fn, device, f"{op} / {device.type}", f"{sub_label}{threads}", num_threads)
 
 
 def _installed_version() -> str:

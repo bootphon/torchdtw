@@ -165,6 +165,29 @@ Times are in microseconds (us).
 ```
 <!-- /benchmark -->
 
+## Soft-DTW
+
+```bash
+python -m dtw_benchmark run soft [--forward-only]
+```
+
+Available implementations, each from padded sequences x and y with the squared Euclidean distance:
+- [pytorch-softdtw-cuda](https://github.com/Maghoumi/pytorch-softdtw-cuda) (Maghoumi): Numba on the CPU
+  and Numba CUDA kernels on the GPU. Not on PyPI: vendored as is in `soft/soft_dtw_cuda.py`, with its
+  MIT license.
+- [sdtw-cuda-torch](https://github.com/BGU-CS-VIL/sdtw-cuda-torch) (BGU-CS-VIL): Numba on the CPU, fused
+  Numba CUDA kernels on the GPU. Not on PyPI: installed from its git repository, at a pinned commit.
+- [tslearn](https://github.com/tslearn-team/tslearn): `SoftDTWLossPyTorch`, Numba on the CPU only.
+- torchdtw: `soft_dtw` on `torch.cdist(x, y) ** 2`.
+
+Each call is a forward and a backward pass, to the gradient with respect to x, unless `--forward-only`.
+Each config (B pairs of sequences of padded length L, with frames of dimension D) runs at the three
+spreads of sequence lengths of the DTW benchmark, with `int32` lengths. Only torchdtw takes per-sequence
+lengths: the other implementations are called once per pair, each sliced to its lengths, whenever the
+lengths of a batch are uneven (the "small" and "large" spreads).
+
+<!-- benchmark-soft -->
+<!-- /benchmark-soft -->
 
 ## Comparing two torchdtw builds
 

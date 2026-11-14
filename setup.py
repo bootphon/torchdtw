@@ -15,7 +15,8 @@ def get_flags() -> tuple[list[str], list[str]]:
         case "linux":
             return ["-Werror", "-fdiagnostics-color=always", "-O3", "-fopenmp"], ["-fopenmp"]
         case "win32":
-            return ["/WX", "/O2", "/openmp"], []
+            # torch/csrc/stable/macros.h calls std::localtime (C4996). Python.h defines this too.
+            return ["/WX", "/O2", "/openmp", "/D_CRT_SECURE_NO_DEPRECATE"], []
         case "darwin":  # On MacOS, we use the OpenMP version vendored by PyTorch
             return ["-Werror", "-fdiagnostics-color=always", "-O3"], []
     raise RuntimeError(sys.platform)
@@ -74,12 +75,12 @@ def get_extensions() -> list[Extension]:
         "cxx": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-DTORCH_STABLE_ONLY", *compiler_flags],
         "nvcc": ["-DTORCH_TARGET_VERSION=0x020A000000000000", "-O3"],
     }
-    cpu_depends = ["src/torchdtw/csrc/common.h", "src/torchdtw/csrc/dtw.h"]
+    cpu_depends = ["src/torchdtw/csrc/common.h", "src/torchdtw/csrc/dtw.h", "src/torchdtw/csrc/soft_dtw.h"]
     gpu_depends = [*cpu_depends, "src/torchdtw/csrc/cuda/common.cuh"]
     extensions = [
         CppExtension(
             "torchdtw._C",
-            ["src/torchdtw/csrc/dtw.cpp"],
+            ["src/torchdtw/csrc/dtw.cpp", "src/torchdtw/csrc/soft_dtw.cpp"],
             depends=cpu_depends,
             extra_compile_args=extra_compile_args,
             extra_link_args=linker_flags,
@@ -89,7 +90,7 @@ def get_extensions() -> list[Extension]:
     if use_cuda:
         cuda_extension = CUDAExtension(
             "torchdtw._C_cuda",
-            ["src/torchdtw/csrc/cuda/dtw.cu"],
+            ["src/torchdtw/csrc/cuda/dtw.cu", "src/torchdtw/csrc/cuda/soft_dtw.cu"],
             depends=gpu_depends,
             extra_compile_args=extra_compile_args,
             py_limited_api=True,
@@ -102,7 +103,7 @@ def get_extensions() -> list[Extension]:
     if use_rocm:
         rocm_extension = CUDAExtension(
             "torchdtw._C_rocm",
-            ["src/torchdtw/csrc/cuda/dtw.cu"],
+            ["src/torchdtw/csrc/cuda/dtw.cu", "src/torchdtw/csrc/cuda/soft_dtw.cu"],
             depends=gpu_depends,
             extra_compile_args=extra_compile_args,
             py_limited_api=True,

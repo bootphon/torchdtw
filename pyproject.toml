@@ -79,6 +79,7 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 119
+extend-exclude = ["benchmark/src/dtw_benchmark/soft/soft_dtw_cuda.py"]
 
 [tool.ruff.lint]
 preview = true
@@ -112,8 +113,11 @@ cache-keys = [
   { file = "src/torchdtw/csrc/common.h" },
   { file = "src/torchdtw/csrc/dtw.cpp" },
   { file = "src/torchdtw/csrc/dtw.h" },
+  { file = "src/torchdtw/csrc/soft_dtw.cpp" },
+  { file = "src/torchdtw/csrc/soft_dtw.h" },
   { file = "src/torchdtw/csrc/cuda/common.cuh" },
   { file = "src/torchdtw/csrc/cuda/dtw.cu" },
+  { file = "src/torchdtw/csrc/cuda/soft_dtw.cu" },
   { file = "benchmark/src/dtw_benchmark/dtw/dtw_cython.pyx" },
   { env = "TORCH_CUDA_ARCH_LIST" },
   { env = "CUDA_HOME" },

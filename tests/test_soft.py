@@ -1,0 +1,663 @@
+"""Soft-DTW: values and gradients against independent references, CPU/CUDA parity, and input handling."""
+
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
+import sys
+
+import pytest
+import torch
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from torch.library import opcheck
+
+import torchdtw
+from torchdtw import soft_dtw, soft_dtw_batch
+
+from .conftest import BATCH, HIGH_MINUS_LOW, LOW, assert_equal, make_tensor
+from .reference import reference_cost
+from .soft_reference import brute_force_soft_dtw, reference_in_band, reference_soft_dtw
+
+GAMMAS = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+# (n, m, bandwidth): square and rectangular, with and without the band.
+SHAPES = [(5, 7, -1), (8, 6, 3), (4, 8, 0), (8, 4, 1), (7, 4, 2), (3, 10, 1), (1, 5, -1), (5, 1, 0), (1, 1, -1)]
+SHARED_BYTES = 49152
+# Size of the accumulator of each dtype: float for half/bfloat16.
+ACC_SIZE = {torch.float64: 8, torch.float32: 4, torch.float16: 4, torch.bfloat16: 4}
+HALF_DTYPES = [torch.float16, torch.bfloat16]
+
+
+def gradcheck(fn: object, *inputs: torch.Tensor) -> None:
+    """Gradcheck with tolerances suited to the log-space backward."""
+    assert torch.autograd.gradcheck(fn, inputs, eps=1e-6, atol=1e-5, rtol=1e-4)
+
+
+def cpu_and_cuda(*tensors: torch.Tensor | None) -> tuple[list, list]:
+    """Detached copies of ``tensors`` on CPU and CUDA, floating ones requiring grad."""
+
+    def copy(t: torch.Tensor | None, device: str) -> torch.Tensor | None:
+        if t is None:
+            return None
+        t = t.detach().to(device)
+        return t.clone().requires_grad_() if t.is_floating_point() else t
+
+    return [copy(t, "cpu") for t in tensors], [copy(t, "cuda") for t in tensors]
+
+
+@pytest.mark.parametrize("gamma", GAMMAS)
+@pytest.mark.parametrize(("n", "m", "bandwidth"), SHAPES)
+def test_soft_dtw_matches_reference(n: int, m: int, bandwidth: int, gamma: float) -> None:
+    """Costs and gradients match the cell-by-cell recursion, differentiated by autograd."""
+    d = torch.rand(2, n, m, dtype=torch.float64, generator=torch.Generator().manual_seed(n * m), requires_grad=True)
+    d_ref = d.detach().clone().requires_grad_()
+    cost = soft_dtw(d, gamma=gamma, bandwidth=bandwidth)
+    expected = torch.stack([reference_soft_dtw(d_ref[b], gamma, bandwidth) for b in range(2)])
+    torch.testing.assert_close(cost, expected)
+    cost.sum().backward()
+    expected.sum().backward()
+    torch.testing.assert_close(d.grad, d_ref.grad)
+
+
+@pytest.mark.parametrize("gamma", GAMMAS)
+@pytest.mark.parametrize(("n", "m"), [(3, 4), (4, 4), (2, 5), (5, 2), (1, 3)])
+def test_soft_dtw_matches_brute_force(n: int, m: int, gamma: float) -> None:
+    """Costs match soft-DTW's definition, the soft minimum over every alignment path."""
+    d = torch.rand(1, n, m, dtype=torch.float64, generator=torch.Generator().manual_seed(n + m))
+    expected = torch.tensor([brute_force_soft_dtw(d[0], gamma)], dtype=torch.float64)
+    torch.testing.assert_close(soft_dtw(d, gamma=gamma), expected)
+
+
+def test_soft_dtw_single_path() -> None:
+    """With a single alignment (one row, one column, or a zero band), the cost is the sum along it, exactly."""
+    row = torch.tensor([[[1.0, 2.0, 3.0]]], dtype=torch.float64)
+    assert_equal(soft_dtw(row), torch.tensor([6.0], dtype=torch.float64))
+    assert_equal(soft_dtw(row.transpose(1, 2)), torch.tensor([6.0], dtype=torch.float64))
+    square = torch.rand(1, 5, 5, dtype=torch.float64)
+    torch.testing.assert_close(soft_dtw(square, bandwidth=0), square[0].diagonal().sum().reshape(1))
+
+
+def test_band_square_is_diagonal_band() -> None:
+    """On square inputs, the band is |i - j| <= bandwidth."""
+    for bandwidth in range(6):
+        for i in range(6):
+            for j in range(6):
+                assert reference_in_band(i, j, 6, 6, bandwidth) == (abs(i - j) <= bandwidth)
+
+
+def test_band_constrains() -> None:
+    """Restricting the alignments can only increase the cost."""
+    d = torch.rand(1, 6, 15, dtype=torch.float64)
+    assert soft_dtw(d, gamma=0.5, bandwidth=1) >= soft_dtw(d, gamma=0.5)
+
+
+def test_small_gamma_approaches_dtw() -> None:
+    """As gamma tends to 0, soft-DTW tends to the unnormalized DTW cost."""
+    d = torch.rand(1, 6, 8, dtype=torch.float64) * 10
+    expected = reference_cost(d[0].numpy())[-1, -1]
+    assert abs(soft_dtw(d, gamma=1e-3).item() - expected) < 0.1
+
+
+def test_soft_dtw_transpose_invariant() -> None:
+    """Swapping the two sequences gives the same cost."""
+    d = torch.rand(2, 5, 8, dtype=torch.float64)
+    torch.testing.assert_close(soft_dtw(d, gamma=0.5), soft_dtw(d.transpose(1, 2), gamma=0.5))
+
+
+@pytest.mark.parametrize("bandwidth", [-1, 2])
+def test_padding_ignored(bandwidth: int) -> None:
+    """Only the (sx[b], sy[b]) sub-block is read, and the padding gets no gradient."""
+    d = torch.rand(3, 10, 10, dtype=torch.float64, requires_grad=True)
+    sx, sy = torch.tensor([6, 10, 3]), torch.tensor([7, 6, 9])
+    cost = soft_dtw(d, sx, sy, gamma=0.5, bandwidth=bandwidth)
+    cost.sum().backward()
+    for b in range(3):
+        sub = d[b, : sx[b], : sy[b]].detach().unsqueeze(0).requires_grad_()
+        cost_b = soft_dtw(sub, gamma=0.5, bandwidth=bandwidth)
+        assert_equal(cost[b : b + 1], cost_b)
+        cost_b.backward()
+        assert_equal(d.grad[b, : sx[b], : sy[b]], sub.grad[0])
+        assert (d.grad[b, sx[b] :] == 0).all()
+        assert (d.grad[b, :, sy[b] :] == 0).all()
+
+
+def test_zero_lengths() -> None:
+    """Pairs with an empty sequence have a zero cost and no gradient."""
+    d = torch.rand(3, 4, 5, dtype=torch.float64, requires_grad=True)
+    cost = soft_dtw(d, torch.tensor([0, 4, 2]), torch.tensor([5, 5, 0]))
+    assert cost[0] == 0
+    assert cost[2] == 0
+    cost.sum().backward()
+    assert (d.grad[0] == 0).all()
+    assert (d.grad[2] == 0).all()
+
+
+def test_soft_dtw_batch_matches_paired() -> None:
+    """All pairs match the paired soft_dtw of each pair, in value and gradient."""
+    d = torch.rand(3, 4, 6, 5, dtype=torch.float64, requires_grad=True)
+    sx, sy = torch.tensor([6, 3, 4]), torch.tensor([5, 2, 4, 1])
+    cost = soft_dtw_batch(d, sx, sy, gamma=0.7, bandwidth=2)
+    weights = torch.rand_like(cost)
+    (cost * weights).sum().backward()
+    for i in range(3):
+        for j in range(4):
+            pair = d[i, j].detach().unsqueeze(0).requires_grad_()
+            cost_ij = soft_dtw(pair, sx[i : i + 1], sy[j : j + 1], gamma=0.7, bandwidth=2)
+            assert_equal(cost[i, j], cost_ij[0])
+            (cost_ij * weights[i, j]).sum().backward()
+            assert_equal(d.grad[i, j], pair.grad[0])
+
+
+def test_gradcheck() -> None:
+    """Analytical gradients match finite differences, with padding, band and all pairs."""
+    d = torch.rand(2, 6, 8, dtype=torch.float64, requires_grad=True)
+    sx, sy = torch.tensor([4, 6]), torch.tensor([5, 8])
+    gradcheck(lambda t: soft_dtw(t, sx, sy, gamma=1.0, bandwidth=2), d)
+    gradcheck(lambda t: soft_dtw(t, gamma=0.01), torch.rand(1, 6, 6, dtype=torch.float64, requires_grad=True))
+    d4 = torch.rand(2, 3, 4, 9, dtype=torch.float64, requires_grad=True)
+    gradcheck(lambda t: soft_dtw_batch(t, torch.tensor([4, 3]), torch.tensor([9, 7, 2]), gamma=0.5, bandwidth=1), d4)
+
+
+def test_small_gamma_gradients_finite() -> None:
+    """The log-space backward stays finite with a small gamma on larger inputs."""
+    d = torch.rand(2, 64, 64, dtype=torch.float64, requires_grad=True)
+    soft_dtw(d, gamma=1e-3).sum().backward()
+    assert torch.isfinite(d.grad).all()
+    assert (d.grad != 0).any()
+
+
+@pytest.mark.parametrize("p", [1.0, 2.0])
+def test_gradcheck_through_distances(p: float) -> None:
+    """Gradients flow from the sequences through the distances between their frames."""
+    x = torch.randn(2, 5, 4, dtype=torch.float64, requires_grad=True)
+    y = torch.randn(2, 7, 4, dtype=torch.float64)
+    sx, sy = torch.tensor([5, 3]), torch.tensor([6, 7])
+    gradcheck(lambda t: soft_dtw(torch.cdist(t, y, p=p) ** p, sx, sy, gamma=0.5, bandwidth=2), x)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, *HALF_DTYPES])
+def test_reduced_precision(dtype: torch.dtype) -> None:
+    """Reduced-precision inputs accumulate in float and stay close to float64, in their own dtype."""
+    d = torch.rand(2, 5, 7, dtype=torch.float64)
+    d_low = d.to(dtype).requires_grad_()
+    cost = soft_dtw(d_low)
+    assert cost.dtype == dtype
+    tolerance = 1e-5 if dtype == torch.float32 else 5e-2
+    torch.testing.assert_close(cost.double(), soft_dtw(d_low.detach().double()), atol=tolerance, rtol=tolerance)
+    cost.sum().backward()
+    assert d_low.grad.dtype == dtype
+    assert torch.isfinite(d_low.grad).all()
+
+
+LENGTH_DTYPES = [torch.uint8, torch.int8, torch.int16, torch.int32, torch.uint16, torch.uint32, torch.uint64]
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("dtype", LENGTH_DTYPES)
+def test_length_dtypes(dtype: torch.dtype, device: str) -> None:
+    """Lengths of any integer dtype give the same costs and gradients as int64 lengths."""
+    d = torch.rand(3, 6, 7, dtype=torch.float64, device=device)
+    sx, sy = torch.tensor([6, 2, 4], device=device), torch.tensor([7, 7, 1], device=device)
+    assert_equal(soft_dtw(d, sx.to(dtype), sy.to(dtype)), soft_dtw(d, sx, sy))
+    assert_equal(soft_dtw(d, sx.to(dtype)), soft_dtw(d, sx, torch.full((3,), 7, device=device)))
+    d4 = torch.rand(3, 2, 6, 7, dtype=torch.float64, device=device, requires_grad=True)
+    d4_ref = d4.detach().clone().requires_grad_()
+    sy2 = sy[:2]
+    soft_dtw_batch(d4, sx.to(dtype), sy2.to(dtype)).sum().backward()
+    soft_dtw_batch(d4_ref, sx, sy2).sum().backward()
+    assert_equal(d4.grad, d4_ref.grad)
+
+
+@pytest.mark.requires_gpu
+def test_cuda_negative_lengths_are_empty() -> None:
+    """On CUDA, negative lengths are empty, as on CPU: zero costs and no gradient."""
+    d = torch.rand(2, 4, 5, dtype=torch.float64, requires_grad=True)
+    (d_cpu, sx, sy), (d_cuda, sx_cuda, sy_cuda) = cpu_and_cuda(d, torch.tensor([4, -3]), torch.tensor([-1, 5]))
+    cost_cpu, cost_cuda = soft_dtw(d_cpu, sx, sy), soft_dtw(d_cuda, sx_cuda, sy_cuda)
+    assert_equal(cost_cuda.cpu(), cost_cpu)
+    assert (cost_cpu == 0).all()
+    (cost_cpu.sum() + d_cpu.sum()).backward()
+    (cost_cuda.sum() + d_cuda.sum()).backward()
+    assert_equal(d_cuda.grad.cpu(), d_cpu.grad)
+
+
+def test_noncontiguous() -> None:
+    """Strided distances and lengths give the same costs and gradients as contiguous ones."""
+    base = torch.rand(6, 10, 12, dtype=torch.float64)
+    strided = base[::2, ::2, ::3].requires_grad_()
+    contiguous = strided.detach().contiguous().requires_grad_()
+    lengths = torch.tensor([5, 0, 3, 0, 4, 0])[::2]
+    assert not strided.is_contiguous()
+    assert not lengths.is_contiguous()
+    cost = soft_dtw(strided, lengths, gamma=0.5)
+    expected = soft_dtw(contiguous, lengths.contiguous(), gamma=0.5)
+    assert_equal(cost, expected)
+    cost.sum().backward()
+    expected.sum().backward()
+    assert_equal(strided.grad, contiguous.grad)
+
+
+def test_r_kept_only_for_backward() -> None:
+    """The accumulated cost matrix R is only returned, and allocated, when keep_R is set."""
+    d = torch.rand(2, 3, 4)
+    _, R = torch.ops.torchdtw.soft_dtw(d, None, None, 1.0, -1, symmetric=False, keep_R=False)
+    assert R.shape == (0,)
+    _, R = torch.ops.torchdtw.soft_dtw(d.half(), None, None, 1.0, -1, symmetric=False, keep_R=True)
+    assert R.shape == d.shape
+    assert R.dtype == torch.float32
+    with pytest.raises(RuntimeError, match="keep_R=True"):
+        torch.ops.torchdtw.soft_dtw_backward(torch.ones(2), d, torch.empty(0), None, None, 1.0, symmetric=False)
+
+
+@pytest.mark.parametrize(
+    ("args", "match"),
+    [
+        ((torch.rand(5, 5), None, None, 1.0), "3D"),
+        ((torch.rand(1, 5, 5), None, None, 0.0), "gamma"),
+        ((torch.randint(0, 9, (1, 5, 5)), None, None, 1.0), "float"),
+        ((torch.rand(1, 5, 5), torch.tensor([[5]]), None, 1.0), "1D"),
+        ((torch.rand(2, 5, 5), torch.tensor([5, 5, 5]), None, 1.0), "sizes must match"),
+        ((torch.rand(1, 5, 5), torch.tensor([5.0]), None, 1.0), "integer dtype"),
+        ((torch.rand(1, 5, 5), torch.tensor([5]), torch.tensor([5], dtype=torch.int32), 1.0), "dtypes do not match"),
+        ((torch.rand(1, 5, 5), torch.tensor([6]), None, 1.0), "sx values must not exceed"),
+        ((torch.rand(2, 3, 5, 5), None, torch.tensor([5, 5, 6]), 1.0), "sy values must not exceed"),
+    ],
+)
+def test_validation(args: tuple, match: str) -> None:
+    """Invalid inputs are rejected with an explicit message."""
+    with pytest.raises(RuntimeError, match=match):
+        torch.ops.torchdtw.soft_dtw(*args, -1, symmetric=False, keep_R=False)
+
+
+@pytest.mark.parametrize("shape", [(3, 5, 5), (2, 3, 5, 5)])
+def test_symmetric_validation(shape: tuple[int, ...]) -> None:
+    """Symmetric mode requires 4D distances between a batch and itself."""
+    with pytest.raises(RuntimeError, match="symmetric soft_dtw requires"):
+        torch.ops.torchdtw.soft_dtw(torch.rand(shape), None, None, 1.0, -1, symmetric=True, keep_R=False)
+
+
+def symmetric_batch(device: str, n: int = 5, s: int = 7) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sequences of a batch, of shape (n, s, 3) and requiring grad, and their lengths, some of them padded."""
+    g = torch.Generator().manual_seed(n * s)
+    x = torch.randn(n, s, 3, dtype=torch.float64, generator=g).to(device).requires_grad_()
+    lengths = torch.randint(1, s + 1, (n,), generator=g).to(device)
+    lengths[0] = s
+    return x, lengths
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("bandwidth", [-1, 1])
+def test_symmetric_matches_all_pairs(device: str, bandwidth: int) -> None:
+    """Symmetric mode gives the costs of all pairs, and the same gradients through the sequences."""
+    x, lengths = symmetric_batch(device)
+    x_ref = x.detach().clone().requires_grad_()
+
+    def costs(x: torch.Tensor, *, symmetric: bool) -> torch.Tensor:
+        d = torch.cdist(x[:, None], x[None]) ** 2
+        return soft_dtw_batch(d, lengths, lengths, gamma=0.5, bandwidth=bandwidth, symmetric=symmetric)
+
+    cost, cost_ref = costs(x, symmetric=True), costs(x_ref, symmetric=False)
+    torch.testing.assert_close(cost, cost_ref)
+    assert_equal(cost, cost.T)
+    weights = torch.rand_like(cost)
+    (cost * weights).sum().backward()
+    (cost_ref * weights).sum().backward()
+    torch.testing.assert_close(x.grad, x_ref.grad)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+def test_symmetric_reads_upper_blocks_only(device: str) -> None:
+    """Symmetric mode reads the blocks i <= j only: the others do not change the costs and get no gradient."""
+    d = torch.rand(4, 4, 5, 5, dtype=torch.float64, device=device, requires_grad=True)
+    lower = torch.ones(4, 4, dtype=torch.bool, device=device).tril(-1)
+    cost = soft_dtw_batch(d, symmetric=True)
+    assert_equal(cost, soft_dtw_batch(torch.where(lower[..., None, None], 0.0, d.detach()), symmetric=True))
+    upper = soft_dtw_batch(d.detach())
+    assert_equal(cost, torch.where(lower, upper.T, upper))
+    cost.sum().backward()
+    assert (d.grad[lower] == 0).all()
+    assert (d.grad[~lower] != 0).any()
+
+
+def test_symmetric_gradcheck() -> None:
+    """Gradients of symmetric mode match finite differences."""
+    d = torch.rand(3, 3, 4, 5, dtype=torch.float64, requires_grad=True)
+    lengths = torch.tensor([4, 2, 3])
+    gradcheck(lambda t: soft_dtw_batch(t, lengths, torch.tensor([5, 3, 1]), gamma=0.5, symmetric=True), d)
+
+
+@pytest.mark.requires_gpu
+@pytest.mark.parametrize("keep_r", [False, True])
+def test_symmetric_cpu_cuda_parity(keep_r: bool) -> None:
+    """Symmetric mode on CUDA matches CPU: costs, R and gradients."""
+    x, lengths = symmetric_batch("cpu", n=6, s=9)
+    d = (torch.cdist(x[:, None], x[None]) ** 2).detach()
+    args = (lengths, lengths, 1.0, 2, True, keep_r)
+    cost_cpu, R_cpu = torch.ops.torchdtw.soft_dtw(d, *args)
+    cost_cuda, R_cuda = torch.ops.torchdtw.soft_dtw(
+        d.cuda(), *(a.cuda() if isinstance(a, torch.Tensor) else a for a in args)
+    )
+    torch.testing.assert_close(cost_cuda.cpu(), cost_cpu)
+    torch.testing.assert_close(R_cuda.cpu(), R_cpu)
+    (d_cpu,), (d_cuda,) = cpu_and_cuda(d)
+    soft_dtw_batch(d_cpu, lengths, lengths, symmetric=True).sum().backward()
+    soft_dtw_batch(d_cuda, lengths.cuda(), lengths.cuda(), symmetric=True).sum().backward()
+    torch.testing.assert_close(d_cuda.grad.cpu(), d_cpu.grad)
+
+
+def test_python_rank_checks() -> None:
+    """soft_dtw takes 2D or 3D distances and soft_dtw_batch 4D ones; lengths need 3D distances."""
+    for shape in [(2,), (1, 1, 2, 2)]:
+        with pytest.raises(RuntimeError, match="2D or 3D"):
+            soft_dtw(torch.rand(shape))
+    with pytest.raises(RuntimeError, match="4D"):
+        soft_dtw_batch(torch.rand(1, 2, 2))
+    with pytest.raises(RuntimeError, match="only accepted with 3D"):
+        soft_dtw(torch.rand(2, 2), torch.tensor([2]))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("bandwidth", [-1, 1])
+def test_single_pair(device: str, bandwidth: int) -> None:
+    """2D distances are a single pair, as in dtw: a scalar cost, equal to the 3D one, and the same gradient."""
+    d = torch.rand(5, 7, dtype=torch.float64, device=device, requires_grad=True)
+    d_batch = d.detach()[None].requires_grad_()
+    cost = soft_dtw(d, gamma=0.5, bandwidth=bandwidth)
+    expected = soft_dtw(d_batch, gamma=0.5, bandwidth=bandwidth)
+    assert cost.shape == ()
+    assert_equal(cost, expected[0])
+    torch.testing.assert_close(cost, reference_soft_dtw(d.detach().cpu(), 0.5, bandwidth).to(device))
+    cost.backward()
+    expected.sum().backward()
+    assert_equal(d.grad, d_batch.grad[0])
+    with torch.no_grad():
+        assert_equal(soft_dtw(d), soft_dtw(d_batch)[0])
+
+
+@pytest.mark.requires_gpu
+@settings(max_examples=30)
+@given(
+    b=st.integers(1, 3),
+    n=st.integers(1, 300),
+    m=st.integers(1, 300),
+    bandwidth=st.integers(-1, 8),
+    gamma=st.sampled_from([0.01, 0.1, 1.0]),
+    seed=st.integers(0, 2**16),
+)
+def test_cpu_cuda_parity(b: int, n: int, m: int, bandwidth: int, gamma: float, seed: int) -> None:
+    """CUDA matches CPU on costs and gradients, with padding and band."""
+    g = torch.Generator().manual_seed(seed)
+    d = torch.rand(b, n, m, dtype=torch.float64, generator=g)
+    sx = torch.randint(0, n + 1, (b,), generator=g, dtype=torch.int32)
+    sy = torch.randint(1, m + 1, (b,), generator=g, dtype=torch.int32)
+    (d_cpu, sx_cpu, sy_cpu), (d_cuda, sx_cuda, sy_cuda) = cpu_and_cuda(d, sx, sy)
+    cost_cpu = soft_dtw(d_cpu, sx_cpu, sy_cpu, gamma=gamma, bandwidth=bandwidth)
+    cost_cuda = soft_dtw(d_cuda, sx_cuda, sy_cuda, gamma=gamma, bandwidth=bandwidth)
+    torch.testing.assert_close(cost_cuda.cpu(), cost_cpu, rtol=1e-6, atol=1e-8)
+    weights = torch.rand(b, dtype=torch.float64, generator=g)
+    (cost_cpu * weights).sum().backward()
+    (cost_cuda * weights.cuda()).sum().backward()
+    torch.testing.assert_close(d_cuda.grad.cpu(), d_cpu.grad, rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.requires_gpu
+def test_cpu_cuda_parity_batch() -> None:
+    """CUDA matches CPU on all pairs, with default lengths and non-contiguous distances."""
+    d = torch.rand(5, 3, 40, 33, dtype=torch.float64).transpose(2, 3).contiguous().transpose(2, 3)
+    for sx, sy in [(None, None), (torch.randint(0, 41, (5,)), torch.randint(1, 34, (3,)))]:
+        (d_cpu, sx_cpu, sy_cpu), (d_cuda, sx_cuda, sy_cuda) = cpu_and_cuda(d, sx, sy)
+        cost_cpu = soft_dtw_batch(d_cpu, sx_cpu, sy_cpu, gamma=0.3, bandwidth=4)
+        cost_cuda = soft_dtw_batch(d_cuda, sx_cuda, sy_cuda, gamma=0.3, bandwidth=4)
+        torch.testing.assert_close(cost_cuda.cpu(), cost_cpu, rtol=1e-6, atol=1e-8)
+        cost_cpu.sum().backward()
+        cost_cuda.sum().backward()
+        torch.testing.assert_close(d_cuda.grad.cpu(), d_cpu.grad, rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.requires_gpu
+@pytest.mark.parametrize("dtype", [torch.float32, *HALF_DTYPES])
+def test_cpu_cuda_parity_reduced_precision(dtype: torch.dtype) -> None:
+    """Reduced-precision CUDA matches CPU up to the rounding of the output."""
+    (d_cpu,), (d_cuda,) = cpu_and_cuda(torch.rand(3, 20, 30).to(dtype))
+    cost_cpu, cost_cuda = soft_dtw(d_cpu), soft_dtw(d_cuda)
+    torch.testing.assert_close(cost_cuda.cpu(), cost_cpu)
+    cost_cpu.sum().backward()
+    cost_cuda.sum().backward()
+    torch.testing.assert_close(d_cuda.grad.cpu(), d_cpu.grad)
+
+
+def check_cpu_cuda_parity(d: torch.Tensor, sx: torch.Tensor | None = None, gamma: float = 10.0) -> None:
+    """soft_dtw on CUDA matches CPU, forward and backward."""
+    (d_cpu, sx_cpu), (d_cuda, sx_cuda) = cpu_and_cuda(d, sx)
+    cost_cpu, cost_cuda = soft_dtw(d_cpu, sx_cpu, gamma=gamma), soft_dtw(d_cuda, sx_cuda, gamma=gamma)
+    torch.testing.assert_close(cost_cuda.cpu(), cost_cpu)
+    cost_cpu.sum().backward()
+    cost_cuda.sum().backward()
+    torch.testing.assert_close(d_cuda.grad.cpu(), d_cpu.grad)
+
+
+@pytest.mark.requires_gpu
+@pytest.mark.parametrize("dtype", list(ACC_SIZE))
+def test_shared_memory_boundary(dtype: torch.dtype) -> None:
+    """Both sides of the shared-memory limit match CPU: the widest size(-1) in shared memory, then in global memory.
+
+    Each block holds 3 diagonals of the accumulator type, of length distances.size(-1).
+    """
+    cap = SHARED_BYTES // (3 * ACC_SIZE[dtype])
+    for m in (cap, cap + 1, 2 * cap):
+        check_cpu_cuda_parity(torch.rand(2, 3, m).to(dtype), torch.tensor([3, 2]))
+
+
+@pytest.mark.requires_gpu
+def test_global_memory_chunks() -> None:
+    """Enough pairs in global memory to need several launches within the scratch budget match CPU.
+
+    With float64 and size(-1) == 2049, just beyond shared memory, a block needs 49184 bytes of scratch, so 256 MiB
+    fit 5457 blocks.
+    """
+    m = SHARED_BYTES // 24 + 1
+    g = torch.Generator().manual_seed(0)
+    d = torch.rand(6000, 2, m, dtype=torch.float64, generator=g)
+    check_cpu_cuda_parity(d, torch.randint(1, 3, (6000,), generator=g), gamma=1.0)
+
+
+@pytest.mark.requires_gpu
+def test_cuda_device_checks() -> None:
+    """Lengths must be on the device of the distances."""
+    with pytest.raises(RuntimeError, match="same device"):
+        soft_dtw(torch.rand(1, 4, 4, device="cuda"), torch.tensor([4]))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("symmetric", [False, True])
+@pytest.mark.parametrize("shape", [(0, 0, 3, 4), (3, 3, 0, 4), (3, 3, 4, 0), (2, 2, 0, 0)])
+def test_empty_inputs(shape: tuple[int, int, int, int], device: str, symmetric: bool) -> None:
+    """An empty batch, or empty sequences, give zero costs and no gradient, as in dtw_batch."""
+    d = torch.rand(shape, dtype=torch.float64, device=device, requires_grad=True)
+    cost = soft_dtw_batch(d, symmetric=symmetric)
+    assert_equal(cost, torch.zeros(shape[:2], dtype=torch.float64, device=device))
+    cost.sum().backward()
+    assert_equal(d.grad, torch.zeros_like(d))
+    if shape[0] > 0:
+        paired = soft_dtw(d.detach()[:, 0])
+        assert_equal(paired, torch.zeros(shape[0], dtype=torch.float64, device=device))
+
+
+def test_empty_sequences_length_exceeds_block() -> None:
+    """On CPU, positive lengths of empty sequences are rejected: they exceed their padded size of 0."""
+    with pytest.raises(RuntimeError, match="must not exceed"):
+        soft_dtw_batch(torch.rand(2, 2, 3, 0), None, torch.tensor([1, 0]))
+
+
+OUT_OF_RANGE_CASES = {
+    "soft_dtw_batch": "torchdtw.soft_dtw_batch(d, s64, torch.tensor([3, 9], device='cuda'))",
+    "soft_dtw_batch symmetric": "torchdtw.soft_dtw_batch(d[..., :3], s32, torch.tensor([3, 5], dtype=torch.int32, "
+    "device='cuda'), symmetric=True)",
+    "soft_dtw backward": (
+        "torchdtw.soft_dtw(d[0].requires_grad_(), torch.tensor([3, 4], device='cuda')).sum().backward()"
+    ),
+    "soft_dtw_batch s2 == 0": "torchdtw.soft_dtw_batch(d[..., :0], s32, torch.tensor([1, 0], dtype=torch.int32, "
+    "device='cuda'))",
+}
+
+
+@pytest.mark.requires_gpu
+@pytest.mark.parametrize("call", OUT_OF_RANGE_CASES.values(), ids=OUT_OF_RANGE_CASES.keys())
+def test_cuda_lengths_out_of_range_assert(call: str) -> None:
+    """On CUDA, lengths beyond the padded sizes trigger a device-side assert, where the CPU backend raises."""
+    script = f"""
+import torch, torchdtw
+d = torch.rand(2, 2, 3, 4, device="cuda")
+s32 = torch.tensor([3, 3], dtype=torch.int32, device="cuda")
+s64 = torch.tensor([3, 3], device="cuda")
+{call}
+torch.cuda.synchronize()
+"""
+    # The script is built from the constants above.
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [sys.executable, "-c", script], capture_output=True, text=True, check=False, timeout=120
+    )
+    assert result.returncode != 0
+    assert "must not exceed" in result.stdout + result.stderr
+
+
+@pytest.mark.requires_gpu
+def test_cuda_padded_path_length_overflow_without_lengths() -> None:
+    """Without lengths, CUDA rejects padded sizes beyond the path-length capacity on the host, as dtw_batch."""
+    with pytest.raises(RuntimeError, match="path-length capacity"):
+        soft_dtw(torch.zeros((1, 1, 70000), device="cuda"))
+
+
+SOFT_DIM = st.integers(1, 64)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@given(n=BATCH, x=SOFT_DIM, y=SOFT_DIM, low=LOW, high_minus_low=HIGH_MINUS_LOW)
+def test_opcheck_soft_dtw(device: str, n: int, x: int, y: int, low: float, high_minus_low: float) -> None:
+    """Verify that soft_dtw, and its backward, can be torch compiled.
+
+    The raw op is not differentiable (soft_dtw is differentiated by an autograd.Function), so its inputs do not
+    require grad here, and the backward op is checked on its own.
+    """
+    sample = make_tensor((n, x, y), dtype=torch.float64, low=low, high=high_minus_low + low, device=device)
+    sx = make_tensor((n,), dtype=torch.long, low=1, high=x, device=device)
+    for keep_r in (False, True):
+        opcheck(torch.ops.torchdtw.soft_dtw.default, (sample, sx, None, 1.0, 2, False, keep_r))
+    cost, R = torch.ops.torchdtw.soft_dtw.default(sample, sx, None, 1.0, 2, symmetric=False, keep_R=True)
+    opcheck(torch.ops.torchdtw.soft_dtw_backward.default, (torch.rand_like(cost), sample, R, sx, None, 1.0, False))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@given(n=BATCH, m=BATCH, x=SOFT_DIM, y=SOFT_DIM, low=LOW, high_minus_low=HIGH_MINUS_LOW)
+def test_opcheck_soft_dtw_batch(
+    device: str, n: int, m: int, x: int, y: int, low: float, high_minus_low: float
+) -> None:
+    """Verify that soft_dtw on all pairs, symmetric or not, and its backward, can be torch compiled."""
+    for symmetric in (False, True):
+        m = n if symmetric else m
+        sample = make_tensor((n, m, x, y), dtype=torch.float64, low=low, high=high_minus_low + low, device=device)
+        sy = make_tensor((m,), dtype=torch.long, low=1, high=y, device=device).int()
+        args = (sample, None, sy, 0.5, -1, symmetric)
+        opcheck(torch.ops.torchdtw.soft_dtw.default, (*args, True))
+        cost, R = torch.ops.torchdtw.soft_dtw.default(*args, keep_R=True)
+        opcheck(
+            torch.ops.torchdtw.soft_dtw_backward.default,
+            (torch.rand_like(cost), sample, R, None, sy, 0.5, symmetric),
+        )
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        # Inductor compiles C++ for the CPU with cl, which is not on the PATH outside a MSVC developer prompt.
+        pytest.param("cpu", marks=pytest.mark.skipif(sys.platform == "win32", reason="Inductor needs cl on Windows")),
+        pytest.param("cuda", marks=pytest.mark.requires_gpu),
+    ],
+)
+def test_compile_soft_dtw_autograd(device: str) -> None:
+    """soft_dtw compiles in a single graph, with the same costs and gradients as in eager mode."""
+
+    def loss(d: torch.Tensor, sx: torch.Tensor) -> torch.Tensor:
+        return torchdtw.soft_dtw(d, sx, gamma=0.5, bandwidth=2).sum()
+
+    torch.compiler.reset()
+    sx = torch.tensor([5, 3, 1], device=device)
+    d = torch.rand(3, 5, 6, dtype=torch.float64, device=device, requires_grad=True)
+    d_eager = d.detach().clone().requires_grad_()
+    torch.compile(loss, fullgraph=True)(d, sx).backward()
+    loss(d_eager, sx).backward()
+    torch.testing.assert_close(d.grad, d_eager.grad, rtol=0, atol=0)
+
+
+def _divided(cost: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor) -> torch.Tensor:
+    """``cost`` divided by the longest path length of each pair, ``sx + sy - 1``, with empty pairs left at 0."""
+    lengths = (sx + sy - 1).clamp(min=1).to(cost.dtype)
+    return torch.where((sx > 0) & (sy > 0), cost / lengths, 0)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+@pytest.mark.parametrize("bandwidth", [-1, 2])
+def test_normalize(device: str, bandwidth: int) -> None:
+    """normalize divides each cost by sx + sy - 1, in value and gradient: paired, all pairs, symmetric and 2D."""
+    kwargs = {"gamma": 0.5, "bandwidth": bandwidth}
+    sx = torch.tensor([6, 0, 3, 5], device=device)
+    sy = torch.tensor([7, 4, 1, 7], device=device)
+    paired = torch.rand(4, 6, 7, dtype=torch.float64, device=device)
+    all_pairs = torch.rand(4, 4, 6, 7, dtype=torch.float64, device=device)
+    symmetric = torch.rand(4, 4, 7, 7, dtype=torch.float64, device=device)
+    cases = [
+        (lambda d, **kw: soft_dtw(d, sx, sy, **kw), paired, _divided(torch.ones(4, device=device), sx, sy)),
+        (
+            lambda d, **kw: soft_dtw_batch(d, sx, sy, **kw),
+            all_pairs,
+            _divided(torch.ones(4, 4, device=device), sx[:, None], sy[None]),
+        ),
+        (
+            lambda d, **kw: soft_dtw_batch(d, sy, sy, symmetric=True, **kw),
+            symmetric,
+            _divided(torch.ones(4, 4, device=device), sy[:, None], sy[None]),
+        ),
+        (soft_dtw, paired[0], torch.tensor(1 / 12, device=device)),
+    ]
+    for fn, d, scale in cases:
+        d_norm, d_ref = d.clone().requires_grad_(), d.clone().requires_grad_()
+        cost = fn(d_norm, normalize=True, **kwargs)
+        expected = fn(d_ref, **kwargs) * scale.to(d.dtype)
+        assert cost.shape == expected.shape
+        torch.testing.assert_close(cost, expected)
+        weights = torch.rand_like(cost)
+        (cost * weights).sum().backward()
+        (expected * weights).sum().backward()
+        torch.testing.assert_close(d_norm.grad, d_ref.grad)
+        with torch.no_grad():
+            torch.testing.assert_close(fn(d, normalize=True, **kwargs), cost.detach())
+
+
+@pytest.mark.requires_gpu
+def test_normalize_cpu_cuda_parity() -> None:
+    """Normalized costs and gradients match between CPU and CUDA."""
+    g = torch.Generator().manual_seed(0)
+    d = torch.rand(5, 3, 30, 20, dtype=torch.float64, generator=g)
+    sx, sy = torch.randint(0, 31, (5,), generator=g), torch.randint(1, 21, (3,), generator=g)
+    (d_cpu, sx_cpu, sy_cpu), (d_cuda, sx_cuda, sy_cuda) = cpu_and_cuda(d, sx, sy)
+    cost_cpu = soft_dtw_batch(d_cpu, sx_cpu, sy_cpu, gamma=0.3, bandwidth=3, normalize=True)
+    cost_cuda = soft_dtw_batch(d_cuda, sx_cuda, sy_cuda, gamma=0.3, bandwidth=3, normalize=True)
+    torch.testing.assert_close(cost_cuda.cpu(), cost_cpu)
+    cost_cpu.sum().backward()
+    cost_cuda.sum().backward()
+    torch.testing.assert_close(d_cuda.grad.cpu(), d_cpu.grad)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.requires_gpu)])
+def test_opcheck_normalize(device: str) -> None:
+    """The normalized forward and backward ops can be torch compiled."""
+    sample = torch.rand(3, 2, 5, 6, dtype=torch.float64, device=device)
+    sx = torch.tensor([5, 2, 0], device=device)
+    for symmetric in (False, True):
+        d = sample[:2, :2, :5, :5] if symmetric else sample
+        lengths = sx[:2] if symmetric else sx
+        opcheck(torch.ops.torchdtw.soft_dtw.default, (d, lengths, None, 0.5, -1, symmetric, True, True))
+        cost, R = torch.ops.torchdtw.soft_dtw.default(
+            d, lengths, None, 0.5, -1, symmetric, keep_R=True, normalize=True
+        )
+        opcheck(
+            torch.ops.torchdtw.soft_dtw_backward.default,
+            (torch.rand_like(cost), d, R, lengths, None, 0.5, symmetric, True),
+        )

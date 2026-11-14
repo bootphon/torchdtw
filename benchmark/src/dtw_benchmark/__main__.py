@@ -2,6 +2,7 @@
 
 Two subcommands, each dispatching to its own logic module:
 - ``run dtw``: benchmark torchdtw against the other DTW implementations (``dtw.run_benchmark``).
+- ``run soft``: benchmark torchdtw against the other soft-DTW implementations (``soft.run_benchmark``).
 - ``compare``: compare two torchdtw builds, by default the latest release against the installed one
   (``compare_release``).
 
@@ -40,6 +41,7 @@ def main() -> None:
             "examples:\n"
             "  python -m dtw_benchmark run dtw\n"
             "  python -m dtw_benchmark run dtw --output README.md\n"
+            "  python -m dtw_benchmark run soft --forward-only\n"
             "  python -m dtw_benchmark compare\n"
             "  python -m dtw_benchmark compare dist/base/torchdtw-*.whl dist/new/torchdtw-*.whl --timer gpu\n"
             "  python -m dtw_benchmark compare torchdtw==1.2.3 installed --only 'cuda n=16x16 s=32x32'"
@@ -53,7 +55,7 @@ def main() -> None:
         help="Benchmark torchdtw against other implementations",
         description="Benchmark torchdtw against other implementations and print timing comparison tables.",
     )
-    run_sub = run_parser.add_subparsers(dest="target", required=True, metavar="{dtw}")
+    run_sub = run_parser.add_subparsers(dest="target", required=True, metavar="{dtw,soft}")
     dtw_parser = run_sub.add_parser(
         "dtw",
         help="dtw and dtw_batch against Cython, Numba, Triton and a naive PyTorch loop",
@@ -63,6 +65,16 @@ def main() -> None:
         ),
     )
     _add_run_options(dtw_parser, "<!-- benchmark -->")
+    soft_parser = run_sub.add_parser(
+        "soft",
+        help="soft_dtw against pytorch-softdtw-cuda, sdtw-cuda-torch and tslearn, forward and backward",
+        description=(
+            "Benchmark torchdtw's soft_dtw against the other soft-DTW implementations (pytorch-softdtw-cuda, "
+            "sdtw-cuda-torch, and tslearn on the CPU), forward and backward."
+        ),
+    )
+    _add_run_options(soft_parser, "<!-- benchmark-soft -->")
+    soft_parser.add_argument("--forward-only", action="store_true", help="Only time the forward pass.")
 
     compare_parser = sub.add_parser(
         "compare",
@@ -119,7 +131,11 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    if args.command == "run":
+    if args.command == "run" and args.target == "soft":
+        from .soft.run_benchmark import benchmark as soft_benchmark
+
+        soft_benchmark(args.min_run_time, args.output, backward=not args.forward_only)
+    elif args.command == "run":
         from .dtw.run_benchmark import benchmark
 
         benchmark(args.min_run_time, args.output)

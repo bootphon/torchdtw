@@ -10,9 +10,12 @@ authors = [
 ]
 dependencies = [
   "numba>=0.62.1",
-  "numpy>=2.3.4",
+  "numba-cuda[cu13]>=0.30.4",
+  "numpy>=2.3.4,<2.5",  # numba-cuda 0.30 still uses np.row_stack, removed in numpy 2.5.
+  "softdtw-cuda-torch",
   "torch>=2.9.0",
   "torchdtw",
+  "tslearn>=0.10.0",
 ]
 
 [build-system]
@@ -24,4 +27,5 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [tool.uv.sources]
+softdtw-cuda-torch = { git = "https://github.com/BGU-CS-VIL/sdtw-cuda-torch", rev = "f752273f07da14848a69bff132c57ab8e26c40fb" }
 torchdtw = { workspace = true }
