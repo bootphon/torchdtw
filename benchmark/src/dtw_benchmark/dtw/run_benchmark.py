@@ -1,10 +1,12 @@
 """DTW benchmark: compare torchdtw's ``dtw`` and ``dtw_batch`` against the other DTW implementations.
 
 Each batch config runs at every spread of sequence lengths of ``cases.SPREADS``, with int32 lengths. torchdtw is
-the correctness reference of every case. Tables have one row per case and one column per implementation.
+the correctness reference of every case. Each implementation runs in its own process (``timing.each_in_own_process``).
+Tables have one row per case and one column per implementation.
 """
 
 import functools
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import torch
@@ -16,68 +18,90 @@ from .implementations import NAIVE, REFERENCE, available
 
 MARKERS = ("<!-- benchmark -->", "<!-- /benchmark -->")
 
+BatchCase = tuple[tuple[int, int, int, int, bool], str]
 
-def single_measurements(shape: tuple[int, int], device: torch.device, *, min_run_time: float) -> list[Measurement]:
-    """Time every single-pair implementation on one shape, after checking it against torchdtw."""
-    x = cases.single_input(shape, device=device)
-    impls = available(device, batched=False)
-    if shape != cases.SHAPES[0]:
-        del impls[NAIVE]  # O(N*M) Python loop: only on the smallest shape
-    calls = {name: functools.partial(fn, x) for name, fn in impls.items()}
-    timing.warm_up_and_check(calls, REFERENCE)
-    return [
-        timing.wall_time(
-            call,
-            label=f"dtw / {device.type}",
-            sub_label=cases.shape_label(shape),
-            description=name,
-            min_run_time=min_run_time,
-            num_threads=torch.get_num_threads(),
+
+def single_worker(
+    name: str,
+    shapes: Sequence[tuple[int, int]],
+    references: Mapping[str, torch.Tensor] | None,
+    *,
+    device: torch.device,
+    min_run_time: float,
+) -> tuple[dict[str, torch.Tensor], list[Measurement]]:
+    """Time the single-pair implementation ``name`` on each shape, after checking it against torchdtw."""
+    fn = available(device, batched=False)[name]
+    outputs, measurements = {}, []
+    for shape in shapes:
+        sub_label = cases.shape_label(shape)
+        call = functools.partial(fn, cases.single_input(shape, device=device))
+        outputs[sub_label] = timing.warm_up(call).cpu()
+        if references is not None:
+            timing.check(name, outputs[sub_label], references[sub_label])
+        measurements.append(
+            timing.wall_time(
+                call,
+                label=f"dtw / {device.type}",
+                sub_label=sub_label,
+                description=name,
+                min_run_time=min_run_time,
+                num_threads=torch.get_num_threads(),
+            )
         )
-        for name, call in calls.items()
-    ]
+    return outputs, measurements
 
 
-def batch_measurements(
-    config: tuple[int, int, int, int, bool], spread: str, device: torch.device, *, min_run_time: float
-) -> list[Measurement]:
-    """Time every batched implementation on one config and spread, after checking it against torchdtw."""
-    d, sx, sy = cases.batch_inputs(config, spread, device=device)
-    symmetric = config[-1]
-    calls = {
-        name: functools.partial(fn, d, sx, sy, symmetric=symmetric)
-        for name, fn in available(device, batched=True).items()
-    }
-    timing.warm_up_and_check(calls, REFERENCE)
-    return [
-        timing.wall_time(
-            call,
-            label=f"dtw_batch / {device.type}",
-            sub_label=cases.batch_label(config, spread),
-            description=name,
-            min_run_time=min_run_time,
-            num_threads=torch.get_num_threads(),
+def batch_worker(
+    name: str,
+    batch_cases: Sequence[BatchCase],
+    references: Mapping[str, torch.Tensor] | None,
+    *,
+    device: torch.device,
+    min_run_time: float,
+) -> tuple[dict[str, torch.Tensor], list[Measurement]]:
+    """Time the batched implementation ``name`` on each config and spread, after checking it against torchdtw."""
+    fn = available(device, batched=True)[name]
+    outputs, measurements = {}, []
+    for config, spread in batch_cases:
+        sub_label = cases.batch_label(config, spread)
+        d, sx, sy = cases.batch_inputs(config, spread, device=device)
+        call = functools.partial(fn, d, sx, sy, symmetric=config[-1])
+        outputs[sub_label] = timing.warm_up(call).cpu()
+        if references is not None:
+            timing.check(name, outputs[sub_label], references[sub_label])
+        measurements.append(
+            timing.wall_time(
+                call,
+                label=f"dtw_batch / {device.type}",
+                sub_label=sub_label,
+                description=name,
+                min_run_time=min_run_time,
+                num_threads=torch.get_num_threads(),
+            )
         )
-        for name, call in calls.items()
-    ]
+    return outputs, measurements
 
 
 def benchmark(min_run_time: float = 0.2, output: Path | None = None) -> None:
     """Benchmark DTW, single-pair then batched. With ``output``, inject the results into a markdown file."""
-    devices = cases.devices()
-    single = [
-        m
-        for device in devices
-        for shape in cases.SHAPES
-        for m in single_measurements(shape, device, min_run_time=min_run_time)
-    ]
-    batched = [
-        m
-        for device in devices
-        for config in cases.BATCH_CONFIGS
-        for spread in cases.SPREADS
-        for m in batch_measurements(config, spread, device, min_run_time=min_run_time)
-    ]
+    single, batched = [], []
+    batch_cases = [(config, spread) for config in cases.BATCH_CONFIGS for spread in cases.SPREADS]
+    for device in cases.devices():
+        shapes = {
+            # O(N*M) Python loop: only on the smallest shape
+            name: cases.SHAPES[:1] if name == NAIVE else cases.SHAPES
+            for name in available(device, batched=False)
+        }
+        single += timing.each_in_own_process(
+            single_worker, shapes, REFERENCE, device=device, min_run_time=min_run_time
+        )
+        batched += timing.each_in_own_process(
+            batch_worker,
+            dict.fromkeys(available(device, batched=True), batch_cases),
+            REFERENCE,
+            device=device,
+            min_run_time=min_run_time,
+        )
     report.show(single)
     report.show(batched)
     if output is not None:

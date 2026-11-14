@@ -1,9 +1,12 @@
-"""Timing helpers shared by ``run`` and ``compare``: wall-clock and GPU time, and the warm-up + correctness check.
+"""Timing helpers shared by ``run`` and ``compare``: wall-clock and GPU time, warm-up, checks, process isolation.
 
 Torch-only, so that ``compare_release.py``, run as a script, can import it as a sibling module.
 """
 
-from collections.abc import Callable, Mapping
+import multiprocessing
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
+from typing import Any
 
 import torch
 from torch.utils.benchmark import Measurement, Timer
@@ -11,6 +14,9 @@ from torch.utils.benchmark.utils.common import TaskSpec
 
 # Smallest duration of one block of calls timed by ``gpu_time``, so that the event resolution does not matter.
 GPU_BLOCK_TIME = 1e-2
+
+# ``worker(name, cases, references, **kwargs) -> (outputs by case label, measurements)``: see ``each_in_own_process``.
+Worker = Callable[..., tuple[dict[str, Any], list[Measurement]]]
 
 
 def wall_time(
@@ -81,24 +87,49 @@ def gpu_time(
     return Measurement(number_per_run=number, raw_times=raw_times, task_spec=task_spec)
 
 
-def warm_up_and_check(
-    calls: Mapping[str, Callable[[], torch.Tensor]],
-    reference: str,
-    *,
-    atol: float | None = None,
-    rtol: float | None = None,
-) -> dict[str, torch.Tensor]:
-    """Call each implementation twice, then check its output against the ``reference`` one.
+def warm_up(call: Callable[[], torch.Tensor]) -> torch.Tensor:
+    """Call ``call`` twice and return its last output.
 
-    The warm-up triggers JIT compilation (Numba, Triton) and fills the allocator caches. ``atol`` and ``rtol`` are
-    the tolerances of ``torch.testing.assert_close``, per runner (both or neither). Returns the outputs, by name.
+    The warm-up triggers JIT compilation (Numba, Triton) and fills the allocator caches.
     """
-    outputs = {}
-    for name, call in calls.items():
-        for _ in range(2):
-            outputs[name] = call()
-    for name, out in outputs.items():
-        torch.testing.assert_close(
-            out, outputs[reference], atol=atol, rtol=rtol, msg=lambda m, name=name: f"{name}: {m}"
-        )
-    return outputs
+    call()
+    return call()
+
+
+def check(
+    name: str, out: torch.Tensor, expected: torch.Tensor, *, atol: float | None = None, rtol: float | None = None
+) -> None:
+    """Check the output of implementation ``name`` against the reference one, with ``torch.testing.assert_close``.
+
+    ``atol`` and ``rtol`` are its tolerances (both or neither).
+    """
+    torch.testing.assert_close(out, expected, atol=atol, rtol=rtol, msg=lambda m: f"{name}: {m}")
+
+
+def in_own_process[T](fn: Callable[..., T], /, *args: object, **kwargs: object) -> T:
+    """Return ``fn(*args, **kwargs)``, run in a new process, started with ``spawn``."""
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+        return pool.submit(fn, *args, **kwargs).result()
+
+
+def each_in_own_process(
+    worker: Worker, cases_by_name: Mapping[str, Sequence[object]], reference: str, **kwargs: object
+) -> list[Measurement]:
+    """Time each implementation in its own process, the reference first, and return the measurements in order.
+
+    ``worker(name, cases, references, **kwargs)`` warms up and times implementation ``name`` on each of its
+    ``cases``, and returns its outputs, by case label and on the CPU, with its measurements. It checks each output
+    against ``references``, the outputs of ``reference``, before timing it. ``references`` is None for ``reference``
+    itself.
+
+    A process per implementation keeps the thread pools of one implementation from slowing down another: Numba's
+    ``omp`` threading layer loads a second OpenMP runtime next to PyTorch's, and once its threads exist the small
+    matrix products of ``torch.cdist`` ran ~60x slower on a shared 24-core allocation. The measurements are in the
+    order of ``cases_by_name``, then of each implementation's cases, which sets the column and row order of the tables.
+    """
+    references, by_name = in_own_process(worker, reference, cases_by_name[reference], None, **kwargs)
+    measurements = {reference: by_name}
+    for name, name_cases in cases_by_name.items():
+        if name != reference:
+            measurements[name] = in_own_process(worker, name, name_cases, references, **kwargs)[1]
+    return [m for name in cases_by_name for m in measurements[name]]

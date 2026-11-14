@@ -21,7 +21,7 @@ import torchdtw
 from .dtw_cython import _dtw_cython, _dtw_cython_batch
 
 NAIVE = "PyTorch naive"
-REFERENCE = "PyTorch C++ extension"
+REFERENCE = "torchdtw"
 
 
 def dtw_torch(distances: torch.Tensor) -> torch.Tensor:

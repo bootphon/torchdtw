@@ -55,8 +55,21 @@ def maghoumi(x: torch.Tensor, y: torch.Tensor, sx: torch.Tensor, sy: torch.Tenso
 def sdtw_cuda_torch(
     x: torch.Tensor, y: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, gamma: float
 ) -> torch.Tensor:
-    """Soft-DTW of sdtw-cuda-torch (BGU-CS-VIL): Numba on CPU, fused Numba CUDA kernels on GPU."""
-    return _batched_or_per_pair(SdtwCudaTorchSoftDTW(gamma=gamma), x, y, sx, sy)
+    """Soft-DTW of sdtw-cuda-torch (BGU-CS-VIL), unfused: distances from one ``bmm``, then Numba (CUDA) kernels.
+
+    Its fast mode, and the only one on the CPU.
+    """
+    return _batched_or_per_pair(SdtwCudaTorchSoftDTW(gamma=gamma, fused=False), x, y, sx, sy)
+
+
+def sdtw_cuda_torch_fused(
+    x: torch.Tensor, y: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, gamma: float
+) -> torch.Tensor:
+    """Soft-DTW of sdtw-cuda-torch, fused: distances recomputed in the DP, one CUDA launch per anti-diagonal.
+
+    Its default on CUDA, which trades speed for memory: it never materializes the (B, N, M) distances.
+    """
+    return _batched_or_per_pair(SdtwCudaTorchSoftDTW(gamma=gamma, fused=True), x, y, sx, sy)
 
 
 def tslearn(x: torch.Tensor, y: torch.Tensor, sx: torch.Tensor, sy: torch.Tensor, gamma: float) -> torch.Tensor:
@@ -68,12 +81,15 @@ def available(device: torch.device) -> dict[str, Callable[..., torch.Tensor]]:
     """Return the implementations runnable on ``device``, by label, in display order, ending with torchdtw.
 
     torchdtw is the correctness reference, under ``REFERENCE``. On CUDA, the Numba implementations need a working
-    Numba CUDA target (the numba-cuda package and a CUDA toolkit), and tslearn only runs on the CPU.
+    Numba CUDA target (the numba-cuda package and a CUDA toolkit), and tslearn only runs on the CPU. The fused mode
+    of sdtw-cuda-torch only exists on CUDA.
     """
     impls: dict[str, Callable[..., torch.Tensor]] = {}
     if device.type == "cpu" or cuda.is_available():
         impls["pytorch-softdtw-cuda"] = maghoumi
         impls["sdtw-cuda-torch"] = sdtw_cuda_torch
+    if device.type == "cuda" and cuda.is_available():
+        impls["sdtw-cuda-torch fused"] = sdtw_cuda_torch_fused
     if device.type == "cpu":
         impls["tslearn"] = tslearn
     impls[REFERENCE] = torchdtw_soft_dtw

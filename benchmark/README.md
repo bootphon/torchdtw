@@ -1,7 +1,9 @@
 # torchdtw benchmarks
 
 Benchmarks of torchdtw against other implementations, and a tool to compare two torchdtw builds.
-Every measurement first checks that the outputs agree.
+Every measurement first checks that the outputs agree with torchdtw's.
+Each implementation runs in its own process, so that the thread pools of one (Numba loads a second
+OpenMP runtime next to PyTorch's) cannot slow down another.
 Submit a PR if you want to add another implementation!
 
 Each runner covers the CPU and, when available, CUDA. Pass `--output README.md` to inject its results
@@ -19,11 +21,11 @@ Available implementations:
 - Cython: convert to numpy array, cython backend for cost computation, then back to PyTorch.
 - Numba: adapted from Whisper.
 - Triton: adapted from Whisper, CUDA only.
-- PyTorch C++ extension: functions from `torchdtw`.
+- torchdtw: `dtw` and `dtw_batch`.
 
 The single-pair function (`dtw`) and the batched function (`dtw_batch`) are both benchmarked.
 The Cython, Numba and Triton backends provide batched variants too;
-the C++ extension is used as the correctness reference for every measurement.
+torchdtw is the correctness reference for every measurement.
 
 Each batch config runs at three spreads of sequence lengths: "none" (every sequence has the padded
 length), "small" (lengths down to 90% of it) and "large" (down to 25%). The lengths are `int32`, the
@@ -34,132 +36,132 @@ to host, compute on the CPU, and copy the result back, so their `cuda` timings i
 host-device transfers rather than measuring on-device work.
 
 <!-- benchmark -->
-### Results on NVIDIA H100 NVL
+### Results on NVIDIA H100 80GB HBM3
 
 ```
-[--------------------------------- dtw / cpu ---------------------------------]
-               |  PyTorch naive  |  Cython  |  Numba   |  PyTorch C++ extension
-32 threads: -------------------------------------------------------------------
-      8x8      |      609.1      |    3.1   |     3.0  |            2.6        
-      16x16    |                 |    3.4   |     3.5  |            2.8        
-      32x32    |                 |    5.2   |     4.7  |            3.5        
-      64x64    |                 |   14.1   |     9.6  |            6.8        
-      128x128  |                 |   55.7   |    30.8  |           22.4        
-      256x256  |                 |  229.7   |   143.2  |           85.5        
-      512x512  |                 |  936.2   |  3782.4  |          338.6        
-      128x512  |                 |  237.0   |   200.3  |           87.1        
-      512x128  |                 |  216.2   |   157.4  |           81.3        
+[-------------------------- dtw / cpu ---------------------------]
+               |  PyTorch naive  |  Cython  |  Numba   |  torchdtw
+24 threads: ------------------------------------------------------
+      8x8      |      779.5      |    3.5   |     3.5  |     2.8  
+      16x16    |                 |    3.8   |     4.1  |     2.8  
+      32x32    |                 |    5.6   |     5.6  |     3.5  
+      64x64    |                 |   13.2   |    11.2  |     7.4  
+      128x128  |                 |   52.1   |    91.2  |    25.0  
+      256x256  |                 |  228.4   |   530.7  |   118.0  
+      512x512  |                 |  949.9   |  2531.8  |   513.1  
+      128x512  |                 |  234.9   |   547.8  |   132.7  
+      512x128  |                 |  214.1   |   438.7  |    97.3  
 
 Times are in microseconds (us).
 
-[-------------------------------------- dtw / cuda --------------------------------------]
-               |  PyTorch naive  |  Cython  |  Numba   |  Triton  |  PyTorch C++ extension
-32 threads: ------------------------------------------------------------------------------
-      8x8      |      2310.6     |    20.8  |    20.8  |   136.5  |           15.7        
-      16x16    |                 |    21.4  |    21.4  |   138.4  |           15.7        
-      32x32    |                 |    23.9  |    23.1  |   175.3  |           26.8        
-      64x64    |                 |    33.7  |    30.0  |   239.3  |           49.2        
-      128x128  |                 |    78.7  |    57.2  |   476.5  |           94.7        
-      256x256  |                 |   265.4  |   315.4  |   770.8  |          192.3        
-      512x512  |                 |  1019.0  |  3938.6  |  1518.9  |          419.5        
-      128x512  |                 |   275.1  |   231.0  |   880.4  |          229.6        
-      512x128  |                 |   252.4  |   206.7  |  1041.0  |          228.5        
+[-------------------------------- dtw / cuda -------------------------------]
+               |  PyTorch naive  |  Cython  |  Numba   |  Triton  |  torchdtw
+24 threads: -----------------------------------------------------------------
+      8x8      |      2856.4     |    24.5  |    23.8  |   114.9  |     9.3  
+      16x16    |                 |    24.7  |    23.9  |   122.1  |    11.0  
+      32x32    |                 |    27.6  |    26.2  |   146.2  |    21.0  
+      64x64    |                 |    38.2  |    36.8  |   207.4  |    40.8  
+      128x128  |                 |    99.1  |   125.6  |   366.8  |    80.5  
+      256x256  |                 |   275.6  |   530.5  |   699.5  |   166.6  
+      512x512  |                 |  1179.7  |  2601.6  |  1417.0  |   365.3  
+      128x512  |                 |   311.7  |   501.4  |   768.4  |   198.5  
+      512x128  |                 |   287.7  |   463.4  |   908.9  |   199.3  
 
 Times are in microseconds (us).
 
-[-------------------------------- dtw_batch / cpu --------------------------------]
-                                    |   Cython  |  Numba   |  PyTorch C++ extension
-32 threads: -----------------------------------------------------------------------
-      n=8x8 s=32x32 sym none        |     69.4  |    91.9  |            15.4       
-      n=8x8 s=32x32 sym small       |     63.7  |    91.1  |            15.9       
-      n=8x8 s=32x32 sym large       |     33.1  |    87.7  |            15.5       
-      n=8x8 s=32x32 asym none       |    149.5  |   107.5  |            25.8       
-      n=8x8 s=32x32 asym small      |    136.2  |   105.9  |            25.0       
-      n=8x8 s=32x32 asym large      |     65.5  |    95.4  |            19.4       
-      n=16x16 s=8x8 sym none        |     20.6  |    91.7  |            13.8       
-      n=16x16 s=8x8 sym small       |     19.2  |    90.3  |            14.6       
-      n=16x16 s=8x8 sym large       |     13.8  |    89.4  |            12.9       
-      n=16x16 s=8x8 asym none       |     36.9  |    95.0  |            16.1       
-      n=16x16 s=8x8 asym small      |     34.4  |    83.1  |            15.3       
-      n=16x16 s=8x8 asym large      |     20.0  |    93.8  |            15.8       
-      n=16x16 s=32x32 sym none      |    275.1  |   134.5  |            20.5       
-      n=16x16 s=32x32 sym small     |    252.4  |   132.4  |            19.8       
-      n=16x16 s=32x32 sym large     |     95.0  |   103.4  |            18.3       
-      n=16x16 s=32x32 asym none     |    581.5  |   179.1  |            37.6       
-      n=16x16 s=32x32 asym small    |    530.5  |   175.2  |            36.4       
-      n=16x16 s=32x32 asym large    |    212.9  |   139.8  |            27.3       
-      n=32x32 s=32x32 sym none      |   1119.6  |   277.5  |            41.5       
-      n=32x32 s=32x32 sym small     |   1006.5  |   262.4  |            39.3       
-      n=32x32 s=32x32 sym large     |    545.6  |   216.8  |            33.5       
-      n=32x32 s=32x32 asym none     |   2311.9  |   428.7  |            60.6       
-      n=32x32 s=32x32 asym small    |   2088.7  |   409.5  |            57.7       
-      n=32x32 s=32x32 asym large    |    940.7  |   295.4  |            41.5       
-      n=64x64 s=16x16 sym none      |   1054.9  |   329.2  |            55.7       
-      n=64x64 s=16x16 sym small     |    881.6  |   335.5  |            53.0       
-      n=64x64 s=16x16 sym large     |    503.7  |   242.6  |            47.2       
-      n=128x128 s=16x16 sym none    |   4545.9  |   841.2  |           169.9       
-      n=128x128 s=16x16 sym small   |   3921.4  |   802.7  |           156.1       
-      n=128x128 s=16x16 sym large   |   2165.9  |   545.4  |           120.5       
-      n=128x128 s=16x16 asym none   |   9145.4  |  1454.7  |           240.1       
-      n=128x128 s=16x16 asym small  |   8027.0  |  1373.2  |           214.3       
-      n=128x128 s=16x16 asym large  |   4399.0  |   936.9  |           147.2       
-      n=256x256 s=8x8 sym none      |   4687.4  |  1159.8  |           321.7       
-      n=256x256 s=8x8 sym small     |   4594.9  |  1175.8  |           311.3       
-      n=256x256 s=8x8 sym large     |   2991.8  |   890.3  |           252.4       
-      n=16x16 s=128x128 sym none    |   6289.5  |   682.2  |           108.8       
-      n=16x16 s=128x128 sym small   |   5760.3  |   643.9  |           104.6       
-      n=16x16 s=128x128 sym large   |   1884.3  |   385.8  |            61.3       
-      n=4x8 s=256x512 asym none     |  14901.5  |  1583.2  |          1379.8       
-      n=4x8 s=256x512 asym small    |  13747.0  |  1408.4  |          1303.6       
-      n=4x8 s=256x512 asym large    |   4938.4  |   801.3  |           614.5       
+[------------------------- dtw_batch / cpu --------------------------]
+                                    |   Cython  |  Numba   |  torchdtw
+24 threads: ----------------------------------------------------------
+      n=8x8 s=32x32 sym none        |     74.5  |    37.5  |    12.9  
+      n=8x8 s=32x32 sym small       |     68.2  |    36.3  |    13.0  
+      n=8x8 s=32x32 sym large       |     36.0  |    32.4  |    11.2  
+      n=8x8 s=32x32 asym none       |    160.5  |    42.9  |    14.6  
+      n=8x8 s=32x32 asym small      |    143.8  |    40.7  |    14.2  
+      n=8x8 s=32x32 asym large      |     69.1  |    38.4  |    12.5  
+      n=16x16 s=8x8 sym none        |     24.8  |    34.5  |    11.2  
+      n=16x16 s=8x8 sym small       |     22.4  |    33.8  |    11.2  
+      n=16x16 s=8x8 sym large       |     16.7  |    34.4  |    10.8  
+      n=16x16 s=8x8 asym none       |     43.2  |    37.9  |    11.4  
+      n=16x16 s=8x8 asym small      |     41.1  |    37.0  |    10.8  
+      n=16x16 s=8x8 asym large      |     22.8  |    35.2  |    10.3  
+      n=16x16 s=32x32 sym none      |    287.5  |    50.7  |    18.0  
+      n=16x16 s=32x32 sym small     |    260.0  |    49.3  |    17.6  
+      n=16x16 s=32x32 sym large     |     97.8  |    40.8  |    14.3  
+      n=16x16 s=32x32 asym none     |    633.1  |   127.7  |    27.8  
+      n=16x16 s=32x32 asym small    |    572.6  |   118.7  |    25.1  
+      n=16x16 s=32x32 asym large    |    225.5  |    54.7  |    18.2  
+      n=32x32 s=32x32 sym none      |   1206.5  |   242.3  |    42.9  
+      n=32x32 s=32x32 sym small     |   1096.3  |   225.7  |    40.4  
+      n=32x32 s=32x32 sym large     |    603.3  |   157.6  |    32.1  
+      n=32x32 s=32x32 asym none     |   2510.6  |   484.1  |    77.7  
+      n=32x32 s=32x32 asym small    |   2123.5  |   461.7  |    70.4  
+      n=32x32 s=32x32 asym large    |   1082.3  |   270.9  |    47.0  
+      n=64x64 s=16x16 sym none      |   1164.6  |   297.2  |    48.4  
+      n=64x64 s=16x16 sym small     |   1007.3  |   269.6  |    45.0  
+      n=64x64 s=16x16 sym large     |    653.5  |   185.9  |    32.2  
+      n=128x128 s=16x16 sym none    |   4564.8  |  1137.0  |   197.2  
+      n=128x128 s=16x16 sym small   |   4186.6  |  1027.3  |   177.7  
+      n=128x128 s=16x16 sym large   |   2593.0  |   612.2  |   117.5  
+      n=128x128 s=16x16 asym none   |   9824.8  |  2236.7  |   360.9  
+      n=128x128 s=16x16 asym small  |   8598.1  |  2048.1  |   325.6  
+      n=128x128 s=16x16 asym large  |   4598.4  |  1213.3  |   204.2  
+      n=256x256 s=8x8 sym none      |   5269.0  |  1317.9  |   274.5  
+      n=256x256 s=8x8 sym small     |   5041.0  |  1263.1  |   273.8  
+      n=256x256 s=8x8 sym large     |   3573.9  |   931.6  |   193.9  
+      n=16x16 s=128x128 sym none    |   6174.1  |   911.2  |   168.1  
+      n=16x16 s=128x128 sym small   |   5696.7  |   860.8  |   168.0  
+      n=16x16 s=128x128 sym large   |   1913.4  |   455.9  |    84.2  
+      n=4x8 s=256x512 asym none     |  15218.4  |  3490.8  |   622.2  
+      n=4x8 s=256x512 asym small    |  13842.3  |  3121.5  |   639.7  
+      n=4x8 s=256x512 asym large    |   4987.4  |  1473.4  |   306.9  
 
 Times are in microseconds (us).
 
-[-------------------------------------- dtw_batch / cuda -------------------------------------]
-                                    |   Cython  |  Numba   |   Triton  |  PyTorch C++ extension
-32 threads: -----------------------------------------------------------------------------------
-      n=8x8 s=32x32 sym none        |    128.3  |   162.4  |    357.5  |           26.0        
-      n=8x8 s=32x32 sym small       |    121.1  |   165.2  |    365.2  |           26.0        
-      n=8x8 s=32x32 sym large       |     98.9  |   157.3  |    356.6  |           23.8        
-      n=8x8 s=32x32 asym none       |    213.0  |   181.9  |    418.8  |           24.6        
-      n=8x8 s=32x32 asym small      |    199.9  |   181.8  |    419.6  |           23.9        
-      n=8x8 s=32x32 asym large      |    147.6  |   170.0  |    410.9  |           22.6        
-      n=16x16 s=8x8 sym none        |     65.5  |   143.7  |    329.5  |            9.5        
-      n=16x16 s=8x8 sym small       |     64.5  |   144.3  |    341.6  |            9.5        
-      n=16x16 s=8x8 sym large       |     60.4  |   143.9  |    341.0  |            9.5        
-      n=16x16 s=8x8 asym none       |     80.3  |   148.1  |    378.5  |            6.8        
-      n=16x16 s=8x8 asym small      |     78.1  |   149.1  |    384.0  |            6.7        
-      n=16x16 s=8x8 asym large      |     64.1  |   147.6  |    390.1  |            6.7        
-      n=16x16 s=32x32 sym none      |    402.4  |   249.5  |    428.7  |           26.5        
-      n=16x16 s=32x32 sym small     |    372.3  |   248.9  |    426.8  |           26.0        
-      n=16x16 s=32x32 sym large     |    235.4  |   222.4  |    427.3  |           25.5        
-      n=16x16 s=32x32 asym none     |    721.2  |   301.6  |    502.6  |           24.8        
-      n=16x16 s=32x32 asym small    |    665.6  |   296.9  |    511.1  |           24.5        
-      n=16x16 s=32x32 asym large    |    414.3  |   262.5  |    509.3  |           23.8        
-      n=32x32 s=32x32 sym none      |   1407.2  |   515.9  |    555.0  |           26.7        
-      n=32x32 s=32x32 sym small     |   1282.2  |   500.6  |    566.2  |           26.5        
-      n=32x32 s=32x32 sym large     |    951.9  |   451.0  |    565.2  |           25.8        
-      n=32x32 s=32x32 asym none     |   2623.5  |   675.5  |    730.6  |           25.5        
-      n=32x32 s=32x32 asym small    |   2441.9  |   660.9  |    778.8  |           25.3        
-      n=32x32 s=32x32 asym large    |   1573.9  |   551.2  |    731.9  |           24.6        
-      n=64x64 s=16x16 sym none      |   1314.5  |   572.7  |    716.3  |           16.2        
-      n=64x64 s=16x16 sym small     |   1133.4  |   559.7  |    729.3  |           16.0        
-      n=64x64 s=16x16 sym large     |    818.4  |   507.5  |    733.4  |           15.0        
-      n=128x128 s=16x16 sym none    |   5616.3  |  1621.0  |  33258.0  |           32.7        
-      n=128x128 s=16x16 sym small   |   4893.9  |  1807.6  |  30079.5  |           31.1        
-      n=128x128 s=16x16 sym large   |   3729.3  |  1447.9  |  32464.1  |           26.1        
-      n=128x128 s=16x16 asym none   |  10092.3  |  2357.4  |  27746.6  |           57.0        
-      n=128x128 s=16x16 asym small  |   9052.1  |  2328.7  |  35205.6  |           53.9        
-      n=128x128 s=16x16 asym large  |   5849.7  |  1761.5  |  39422.3  |           39.5        
-      n=256x256 s=8x8 sym none      |   5893.6  |  1926.4  |  39251.2  |           54.7        
-      n=256x256 s=8x8 sym small     |   5288.9  |  1928.0  |  49938.6  |           51.6        
-      n=256x256 s=8x8 sym large     |   3790.6  |  1704.4  |  21424.9  |           36.4        
-      n=16x16 s=128x128 sym none    |   7039.2  |  1780.6  |    841.8  |           97.1        
-      n=16x16 s=128x128 sym small   |   6540.2  |  1416.2  |    927.0  |           96.7        
-      n=16x16 s=128x128 sym large   |   2661.3  |  1476.8  |    881.6  |           84.9        
-      n=4x8 s=256x512 asym none     |  15943.4  |  2369.7  |   1582.6  |          295.4        
-      n=4x8 s=256x512 asym small    |  14490.8  |  2405.9  |   1824.4  |          295.2        
-      n=4x8 s=256x512 asym large    |   5812.8  |  1538.0  |   1523.8  |          221.4        
+[------------------------------- dtw_batch / cuda ------------------------------]
+                                    |   Cython  |  Numba   |  Triton  |  torchdtw
+24 threads: ---------------------------------------------------------------------
+      n=8x8 s=32x32 sym none        |    140.0  |   118.9  |   338.5  |    23.8  
+      n=8x8 s=32x32 sym small       |    137.7  |   119.5  |   345.0  |    23.8  
+      n=8x8 s=32x32 sym large       |    105.7  |   113.4  |   332.8  |    21.9  
+      n=8x8 s=32x32 asym none       |    222.7  |   129.7  |   408.7  |    21.8  
+      n=8x8 s=32x32 asym small      |    204.4  |   123.8  |   399.5  |    21.6  
+      n=8x8 s=32x32 asym large      |    140.0  |   120.1  |   397.1  |    20.9  
+      n=16x16 s=8x8 sym none        |     72.0  |    91.8  |   310.7  |    11.0  
+      n=16x16 s=8x8 sym small       |     68.9  |    91.0  |   313.0  |    11.0  
+      n=16x16 s=8x8 sym large       |     65.3  |    89.8  |   314.0  |    10.9  
+      n=16x16 s=8x8 asym none       |     91.1  |    87.9  |   361.8  |     7.1  
+      n=16x16 s=8x8 asym small      |     87.1  |    87.8  |   354.7  |     7.0  
+      n=16x16 s=8x8 asym large      |     76.7  |    87.0  |   362.4  |     7.1  
+      n=16x16 s=32x32 sym none      |    416.1  |   186.2  |   444.8  |    24.0  
+      n=16x16 s=32x32 sym small     |    390.1  |   187.9  |   435.8  |    23.6  
+      n=16x16 s=32x32 sym large     |    245.1  |   172.6  |   396.5  |    23.6  
+      n=16x16 s=32x32 asym none     |    830.5  |   269.0  |   776.8  |    22.1  
+      n=16x16 s=32x32 asym small    |    772.9  |   284.7  |   622.0  |    22.1  
+      n=16x16 s=32x32 asym large    |    423.9  |   210.8  |   545.9  |    21.5  
+      n=32x32 s=32x32 sym none      |   1522.1  |   606.2  |   754.2  |    24.1  
+      n=32x32 s=32x32 sym small     |   1447.5  |   613.1  |   720.5  |    24.1  
+      n=32x32 s=32x32 sym large     |   1048.2  |   547.1  |   680.8  |    23.6  
+      n=32x32 s=32x32 asym none     |   2890.2  |   834.3  |  1458.0  |    22.9  
+      n=32x32 s=32x32 asym small    |   2538.7  |   815.0  |  1203.0  |    22.9  
+      n=32x32 s=32x32 asym large    |   1413.5  |   714.2  |  1169.6  |    22.2  
+      n=64x64 s=16x16 sym none      |   1462.2  |   692.9  |  1014.4  |    14.7  
+      n=64x64 s=16x16 sym small     |   1325.1  |   665.5  |   948.7  |    14.5  
+      n=64x64 s=16x16 sym large     |   1000.9  |   563.3  |  1020.2  |    14.0  
+      n=128x128 s=16x16 sym none    |   6468.5  |  1976.2  |  2967.9  |    29.2  
+      n=128x128 s=16x16 sym small   |   5212.6  |  1918.2  |  2385.0  |    27.8  
+      n=128x128 s=16x16 sym large   |   3333.3  |  1557.0  |  2463.2  |    23.3  
+      n=128x128 s=16x16 asym none   |  10236.1  |  4018.4  |  5334.8  |    50.8  
+      n=128x128 s=16x16 asym small  |  10881.2  |  4303.0  |  4884.6  |    48.0  
+      n=128x128 s=16x16 asym large  |   6096.5  |  2944.0  |  4246.1  |    35.2  
+      n=256x256 s=8x8 sym none      |   5766.9  |  2703.1  |  4158.7  |    49.4  
+      n=256x256 s=8x8 sym small     |   6291.2  |  2457.8  |  3975.1  |    46.6  
+      n=256x256 s=8x8 sym large     |   5586.1  |  2042.0  |  3146.7  |    33.2  
+      n=16x16 s=128x128 sym none    |   7699.9  |  2059.1  |  1531.4  |    87.0  
+      n=16x16 s=128x128 sym small   |   7153.2  |  2567.2  |  1816.9  |    86.3  
+      n=16x16 s=128x128 sym large   |   3056.2  |  1826.8  |  1438.7  |    76.7  
+      n=4x8 s=256x512 asym none     |  17089.7  |  5744.9  |  2802.3  |   263.7  
+      n=4x8 s=256x512 asym small    |  16166.7  |  5400.9  |  4082.9  |   261.4  
+      n=4x8 s=256x512 asym large    |   6686.0  |  2593.9  |  3982.1  |   197.5  
 
 Times are in microseconds (us).
 ```
@@ -175,8 +177,12 @@ Available implementations, each from padded sequences x and y with the squared E
 - [pytorch-softdtw-cuda](https://github.com/Maghoumi/pytorch-softdtw-cuda) (Maghoumi): Numba on the CPU
   and Numba CUDA kernels on the GPU. Not on PyPI: vendored as is in `soft/soft_dtw_cuda.py`, with its
   MIT license.
-- [sdtw-cuda-torch](https://github.com/BGU-CS-VIL/sdtw-cuda-torch) (BGU-CS-VIL): Numba on the CPU, fused
-  Numba CUDA kernels on the GPU. Not on PyPI: installed from its git repository, at a pinned commit.
+- [sdtw-cuda-torch](https://github.com/BGU-CS-VIL/sdtw-cuda-torch) (BGU-CS-VIL): Numba on the CPU, and
+  Numba CUDA kernels on the GPU, in two modes. "sdtw-cuda-torch" is its unfused mode: the distances
+  come from one `bmm`, then the DP kernels run on them. This is its fast mode, and the only one on the
+  CPU. "sdtw-cuda-torch fused" is its default on CUDA: it recomputes the distances inside the DP, with
+  one kernel launch per anti-diagonal, and so never stores the (B, N, M) distances, at the cost of speed.
+  Not on PyPI: installed from its git repository, at a pinned commit.
 - [tslearn](https://github.com/tslearn-team/tslearn): `SoftDTWLossPyTorch`, Numba on the CPU only.
 - torchdtw: `soft_dtw` on `torch.cdist(x, y) ** 2`.
 
@@ -187,6 +193,57 @@ lengths: the other implementations are called once per pair, each sliced to its 
 lengths of a batch are uneven (the "small" and "large" spreads).
 
 <!-- benchmark-soft -->
+### Results on NVIDIA H100 80GB HBM3
+
+```
+[----------------------------- soft_dtw / cpu (forward + backward) ------------------------------]
+                             |  pytorch-softdtw-cuda  |  sdtw-cuda-torch  |  tslearn   |  torchdtw
+24 threads: --------------------------------------------------------------------------------------
+      B=64 L=16 D=8 none     |           778.9        |         733.0     |     712.7  |    363.8 
+      B=64 L=16 D=8 small    |         17634.2        |       21252.7     |   13738.6  |    342.3 
+      B=64 L=16 D=8 large    |         16744.4        |       20031.6     |   12506.1  |    240.2 
+      B=64 L=32 D=8 none     |          1275.9        |        1242.8     |    1088.1  |   1001.2 
+      B=64 L=32 D=8 small    |         23858.2        |       25293.2     |   19345.5  |    943.5 
+      B=64 L=32 D=8 large    |         19605.7        |       22207.7     |   15031.8  |    762.0 
+      B=64 L=64 D=8 none     |          3239.5        |        2631.8     |    3289.6  |   2265.4 
+      B=64 L=64 D=8 small    |         44800.9        |       42634.9     |   42849.6  |   2204.5 
+      B=64 L=64 D=8 large    |         29007.8        |       30168.4     |   25910.3  |   1726.9 
+      B=64 L=256 D=12 none   |         74842.2        |       36027.1     |   69751.6  |  24312.9 
+      B=64 L=256 D=12 small  |        364477.2        |      347272.6     |  379264.1  |  23503.1 
+      B=64 L=256 D=12 large  |        187879.4        |      180657.7     |  191648.9  |  17674.3 
+      B=32 L=256 D=16 none   |         45422.2        |       16763.7     |   44430.1  |  16069.0 
+      B=32 L=256 D=16 small  |        183315.0        |      175946.9     |  189264.0  |  15418.5 
+      B=32 L=256 D=16 large  |         89351.7        |       84575.3     |   90757.8  |  12205.6 
+      B=16 L=512 D=16 none   |        102428.5        |       40450.9     |   89276.9  |  31618.9 
+      B=16 L=512 D=16 small  |        352299.8        |      326604.7     |  366272.0  |  28973.5 
+      B=16 L=512 D=16 large  |        125627.4        |      117384.5     |  130606.6  |  20415.6 
+
+Times are in microseconds (us).
+
+[------------------------------------ soft_dtw / cuda (forward + backward) -----------------------------------]
+                             |  pytorch-softdtw-cuda  |  sdtw-cuda-torch  |  sdtw-cuda-torch fused  |  torchdtw
+24 threads: ---------------------------------------------------------------------------------------------------
+      B=64 L=16 D=8 none     |          901.4         |       1116.2      |           2825.7        |    197.2 
+      B=64 L=16 D=8 small    |        43187.6         |      51280.0      |         148016.3        |    191.2 
+      B=64 L=16 D=8 large    |        43563.9         |      50718.7      |         114890.4        |    194.5 
+      B=64 L=32 D=8 none     |          898.9         |       1096.2      |           4724.2        |    418.6 
+      B=64 L=32 D=8 small    |        44160.5         |      53628.7      |         266892.7        |    418.2 
+      B=64 L=32 D=8 large    |        40742.4         |      52075.5      |         180554.3        |    418.3 
+      B=64 L=64 D=8 none     |          874.6         |       1067.1      |           8323.3        |    416.2 
+      B=64 L=64 D=8 small    |        46005.5         |      56729.7      |         483366.7        |    415.7 
+      B=64 L=64 D=8 large    |        44811.9         |      55090.5      |         346864.5        |    405.0 
+      B=64 L=256 D=12 none   |         2634.6         |       1800.7      |          31428.2        |   1025.2 
+      B=64 L=256 D=12 small  |        81365.2         |      82347.1      |        1818901.4        |   1087.8 
+      B=64 L=256 D=12 large  |        64378.0         |      68619.0      |        1323377.5        |    971.7 
+      B=32 L=256 D=16 none   |         2202.3         |       1587.4      |          31708.5        |    790.1 
+      B=32 L=256 D=16 small  |        41631.1         |      41872.6      |         929014.4        |    848.1 
+      B=32 L=256 D=16 large  |        32178.9         |      35337.5      |         651048.1        |    823.6 
+      B=16 L=512 D=16 none   |         4464.3         |       3291.4      |          63352.0        |   1968.2 
+      B=16 L=512 D=16 small  |        42085.8         |      43811.3      |         910916.2        |   2071.5 
+      B=16 L=512 D=16 large  |        24021.5         |      24356.7      |         543484.5        |   1655.4 
+
+Times are in microseconds (us).
+```
 <!-- /benchmark-soft -->
 
 ## Comparing two torchdtw builds
@@ -202,5 +259,5 @@ the torchdtw of the current environment. By default, the latest release on PyPI 
 - `--timer wall` (default): wall-clock time per call, with a CUDA sync after each call, so that it
   includes the host overhead.
 - `--timer gpu`: GPU time per call, from CUDA events around a loop of calls. CPU cases stay wall-clock.
-- `--only`: keep the cases whose label contains the substring, e.g. `--only "cuda n=16x16 s=32x32"`,
+- `--only`: keep the cases whose label contains the substring at the start of a word, e.g. `--only "cuda n=16x16 s=32x32"`,
   to re-run only the cases that moved.

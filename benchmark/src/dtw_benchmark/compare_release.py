@@ -83,6 +83,8 @@ def measure_all(
 ) -> tuple[dict, list[Measurement]]:
     """Measure ``dtw`` and ``dtw_batch`` on every case whose ``"<label> <sub_label>"`` contains ``only``.
 
+    ``only`` matches at the start of a word only, so that ``"dtw / cpu"`` does not match ``"soft_dtw / cpu"``.
+
     Batch cases run with int32 and int64 lengths, and on the CPU with 1 thread and with all of them.
     """
     import torchdtw  # only the child imports torchdtw
@@ -92,7 +94,7 @@ def measure_all(
     def measure(
         fn: Callable[[], torch.Tensor], device: torch.device, label: str, sub_label: str, num_threads: int = 1
     ) -> None:
-        if only is not None and only not in f"{label} {sub_label}":
+        if only is not None and f" {only}" not in f" {label} {sub_label}":
             return
         fn()  # warm-up
         outputs[label, sub_label] = fn().detach().cpu().clone()

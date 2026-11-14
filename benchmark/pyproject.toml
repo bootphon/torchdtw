@@ -9,6 +9,7 @@ authors = [
   { name = "CoML", email = "dev@cognitive-ml.fr" },
 ]
 dependencies = [
+  "cuda-bindings>=13.5.0,<14",
   "numba>=0.62.1",
   "numba-cuda[cu13]>=0.30.4",
   "numpy>=2.3.4,<2.5",  # numba-cuda 0.30 still uses np.row_stack, removed in numpy 2.5.

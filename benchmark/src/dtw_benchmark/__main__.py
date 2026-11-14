@@ -114,7 +114,7 @@ def main() -> None:
         "--only",
         metavar="SUBSTRING",
         help="Only measure the cases whose label (e.g. 'dtw_batch / cuda n=16x16 s=32x32 sym none int32') "
-        "contains SUBSTRING.",
+        "contains SUBSTRING at the start of a word, so that 'dtw / cpu' does not match 'soft_dtw / cpu'.",
     )
     compare_parser.add_argument(
         "--min-run-time",
